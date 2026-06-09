@@ -4,6 +4,9 @@ import anthropic
 import requests
 import plotly.graph_objects as go
 import numpy as np
+import pandas as pd
+import io
+from datetime import datetime, timedelta
 from scipy.signal import argrelextrema
 
 st.set_page_config(page_title="Stock Analyzer", layout="wide")
@@ -196,6 +199,65 @@ def get_macro_data():
     except:
         return "ไม่สามารถดึงข้อมูล macro ได้"
 
+
+@st.cache_data(ttl=3600)
+def get_macro_timeseries():
+    """ดึง Fed Rate และ CPI ย้อนหลัง 6 เดือนเป็น time series"""
+    try:
+        cutoff   = datetime.now() - timedelta(days=180)
+        fed_text = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS", timeout=5).text
+        cpi_text = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL", timeout=5).text
+        fed_df   = pd.read_csv(io.StringIO(fed_text))
+        cpi_df   = pd.read_csv(io.StringIO(cpi_text))
+        fed_df.columns = cpi_df.columns = ["date", "value"]
+        for df in [fed_df, cpi_df]:
+            df["date"]  = pd.to_datetime(df["date"])
+            df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        fed_df = fed_df[fed_df["date"] >= cutoff].dropna()
+        cpi_df = cpi_df[cpi_df["date"] >= cutoff].dropna()
+        return fed_df, cpi_df
+    except:
+        return None, None
+
+SECTOR_PEERS = {
+    "Technology":             ["AAPL", "MSFT", "GOOGL", "META", "NVDA", "AMD", "INTC"],
+    "Information Technology": ["AAPL", "MSFT", "NVDA", "AMD", "AVGO", "QCOM", "TXN"],
+    "Industrials":            ["GE", "HON", "MMM", "CAT", "BA", "LMT", "RTX"],
+    "Energy":                 ["XOM", "CVX", "COP", "SLB", "HAL", "BP", "SHEL"],
+    "Healthcare":             ["JNJ", "PFE", "MRK", "ABT", "TMO", "UNH", "AMGN"],
+    "Financials":             ["JPM", "BAC", "WFC", "GS", "MS", "C", "BLK"],
+    "Consumer Discretionary": ["AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "TGT"],
+    "Consumer Staples":       ["PG", "KO", "PEP", "WMT", "COST", "CL", "GIS"],
+    "Real Estate":            ["AMT", "PLD", "CCI", "EQIX", "PSA", "DLR", "SPG"],
+    "Utilities":              ["NEE", "DUK", "SO", "D", "AEP", "EXC", "SRE"],
+    "Materials":              ["LIN", "APD", "SHW", "ECL", "NEM", "FCX", "NUE"],
+    "Communication Services": ["GOOGL", "META", "NFLX", "DIS", "CMCSA", "T", "VZ"],
+}
+
+@st.cache_data(ttl=3600)
+def get_competitors(ticker, sector):
+    """ดึงข้อมูลคู่แข่งใน sector เดียวกัน"""
+    peers   = [p for p in SECTOR_PEERS.get(sector, []) if p != ticker][:4]
+    results = []
+    for p in peers:
+        try:
+            info = yf.Ticker(p).info
+            if not info.get("currentPrice") and not info.get("regularMarketPrice"):
+                continue
+            results.append({
+                "ticker":       p,
+                "name":         info.get("shortName", p)[:20],
+                "price":        info.get("currentPrice") or info.get("regularMarketPrice", 0),
+                "market_cap_b": round(info.get("marketCap", 0) / 1e9, 1),
+                "pe":           info.get("trailingPE"),
+                "pb":           info.get("priceToBook"),
+                "rev_growth":   info.get("revenueGrowth"),
+                "gross_margin": info.get("grossMargins"),
+            })
+        except:
+            pass
+    return results
+
 # ===== CHART CALCULATIONS =====
 
 def calc_bollinger(hist, window=20, k=2):
@@ -224,7 +286,7 @@ def calc_trendlines(hist):
 
 # ===== CHART DRAW =====
 
-def draw_chart(name, ticker, hist, fin, bs, cf):
+def draw_chart(name, ticker, hist, fin, bs, cf, sector='Technology'):
     H = 300
     M = dict(l=0, r=0, t=40, b=0)
 
@@ -327,6 +389,48 @@ def draw_chart(name, ticker, hist, fin, bs, cf):
             fig.update_layout(title="Debt vs Cash (B$)", barmode="group", height=H, margin=M)
             st.plotly_chart(fig, use_container_width=True)
 
+
+    elif name == "Macro Overlay":
+        fed_df, cpi_df = get_macro_timeseries()
+        if fed_df is not None and not fed_df.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"], name="ราคา",
+                                      line=dict(color="#378ADD", width=2), yaxis="y1"))
+            fig.add_trace(go.Scatter(x=fed_df["date"], y=fed_df["value"], name="Fed Rate (%)",
+                                      line=dict(color="#E24B4A", dash="dash", width=1.5), yaxis="y2"))
+            fig.update_layout(
+                title="ราคาหุ้น vs Fed Rate",
+                height=300, margin=dict(l=0, r=60, t=40, b=0),
+                yaxis=dict(title="ราคา ($)"),
+                yaxis2=dict(title="Fed Rate (%)", overlaying="y", side="right",
+                             showgrid=False, tickformat=".2f"),
+                legend=dict(x=0, y=1)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("ไม่สามารถดึงข้อมูล Macro ได้")
+
+    elif name == "Peer Comparison":
+        competitors = get_competitors(ticker, sector)
+        if competitors:
+            peers_all = [{"ticker": ticker, "name": "This Stock",
+                           "market_cap_b": 0, "pe": None, "gross_margin": None,
+                           "rev_growth": None}] + competitors
+            tickers   = [p["ticker"] for p in competitors]
+            caps      = [p["market_cap_b"] for p in competitors]
+            pes       = [p["pe"] if p["pe"] else 0 for p in competitors]
+            margins   = [round(p["gross_margin"]*100, 1) if p["gross_margin"] else 0 for p in competitors]
+            growths   = [round(p["rev_growth"]*100, 1) if p["rev_growth"] else 0 for p in competitors]
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name="Market Cap (B$)", x=tickers, y=caps,   marker_color="#378ADD"))
+            fig.add_trace(go.Bar(name="P/E",             x=tickers, y=pes,    marker_color="#EF9F27"))
+            fig.add_trace(go.Bar(name="Gross Margin (%)", x=tickers, y=margins, marker_color="#1D9E75"))
+            fig.update_layout(title="Peer Comparison", barmode="group", height=300,
+                               margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("ไม่พบข้อมูลคู่แข่งใน sector นี้")
+
 # ===== AGENTS =====
 
 def run_agent(prompt, max_tokens=1000):
@@ -371,6 +475,35 @@ def orchestrator_agent(company, fin, mac, news, tech):
 [Technical]: {tech}
 สรุป: 1.น่าลงทุนมั้ย 2.จุดเข้าซื้อ 3.Stop Loss 4.ระดับความเสี่ยง 5.กลยุทธ์
 ตอบเป็นภาษาไทย ละเอียด มีตัวเลขชัดเจน""", 3000)
+
+
+def competitor_agent(company, competitors):
+    """วิเคราะห์เปรียบเทียบคู่แข่ง"""
+    if not competitors:
+        return "ไม่พบข้อมูลคู่แข่ง"
+    comp_summary = "\n".join([
+        f"- {c['ticker']} ({c['name']}): "
+        f"Market Cap=${c['market_cap_b']:.1f}B, "
+        f"P/E={c['pe']:.1f if c['pe'] else 'N/A'}, "
+        f"Gross Margin={round(c['gross_margin']*100,1) if c['gross_margin'] else 'N/A'}%, "
+        f"Rev Growth={round(c['rev_growth']*100,1) if c['rev_growth'] else 'N/A'}%"
+        for c in competitors
+    ])
+    return run_agent(f"""คุณเป็น Competitive Intelligence Analyst
+เปรียบเทียบ {company['ticker']} กับคู่แข่งใน sector เดียวกัน
+
+{company['ticker']} — Market Cap=${company['market_cap_b']:.1f}B
+
+คู่แข่ง:
+{comp_summary}
+
+วิเคราะห์:
+1. จุดแข็ง/อ่อนของ {company['ticker']} เมื่อเทียบกับคู่แข่ง
+2. {company['ticker']} แพง/ถูกกว่าคู่แข่งมั้ย (relative valuation)
+3. ใครเติบโตเร็วกว่าและทำไม
+4. สรุป: {company['ticker']} น่าสนใจกว่าคู่แข่งมั้ย
+
+ตอบเป็นภาษาไทย กระชับ มีตัวเลขอ้างอิง""", 1000)
 
 def chat_agent(ticker, company, fin_result, mac_result, news_result, tech_result, final, messages):
     """Chat Agent ที่รู้จักผลวิเคราะห์ทั้งหมดและราคา real-time"""
@@ -474,8 +607,8 @@ if st.button("Analyze", type="primary") and ticker_input:
         st.session_state["chat_messages"][ticker_input] = []
 
     # ===== TABS =====
-    tab_dash, tab_fin, tab_mac, tab_news, tab_tech, tab_full, tab_chat = st.tabs([
-        "Dashboard", "Financial", "Macro", "News", "Technical", "CIO Full Report", "Chat"
+    tab_dash, tab_fin, tab_mac, tab_news, tab_tech, tab_full, tab_comp, tab_chat = st.tabs([
+        "Dashboard", "Financial", "Macro", "News", "Technical", "CIO Full Report", "Competitors", "Chat"
     ])
 
     # ===== DASHBOARD TAB =====
@@ -493,6 +626,7 @@ if st.button("Analyze", type="primary") and ticker_input:
             "ราคา + MA", "Bollinger Bands", "Trendline",
             "Volume", "RSI",
             "Revenue", "Gross Margin", "Free Cash Flow", "Debt vs Cash",
+            "Macro Overlay", "Peer Comparison",
         ]
         selected_charts = st.multiselect(
             "เลือกกราฟ (เลือกได้สูงสุด 2 เพื่อดูคู่กัน)",
@@ -503,11 +637,11 @@ if st.button("Analyze", type="primary") and ticker_input:
         if len(selected_charts) == 2:
             gc1, gc2 = st.columns(2)
             with gc1:
-                draw_chart(selected_charts[0], ticker_input, hist, fin, bs, cf)
+                draw_chart(selected_charts[0], ticker_input, hist, fin, bs, cf, company.get('sector','Technology'))
             with gc2:
-                draw_chart(selected_charts[1], ticker_input, hist, fin, bs, cf)
+                draw_chart(selected_charts[1], ticker_input, hist, fin, bs, cf, company.get('sector','Technology'))
         elif len(selected_charts) == 1:
-            draw_chart(selected_charts[0], ticker_input, hist, fin, bs, cf)
+            draw_chart(selected_charts[0], ticker_input, hist, fin, bs, cf, company.get('sector','Technology'))
 
         st.divider()
 
@@ -602,6 +736,54 @@ if st.button("Analyze", type="primary") and ticker_input:
         )
         if msgs:
             st.caption(f"ไฟล์นี้รวมบทสนทนา {len(msgs)} ข้อความไว้ด้วย Upload กลับมาคุยต่อได้เลย")
+
+    # ===== COMPETITORS TAB =====
+    with tab_comp:
+        st.subheader(f"Competitor Analysis — {ticker_input}")
+        st.caption(f"เปรียบเทียบกับคู่แข่งใน {company['sector']}")
+
+        with st.spinner("กำลังดึงข้อมูลคู่แข่ง..."):
+            competitors = get_competitors(ticker_input, company.get("sector", "Technology"))
+
+        if competitors:
+            # ตารางเปรียบเทียบ
+            comp_data = {
+                "Ticker":         [ticker_input] + [c["ticker"] for c in competitors],
+                "Name":           [company["name"][:20]] + [c["name"] for c in competitors],
+                "Market Cap (B$)": [company["market_cap_b"]] + [c["market_cap_b"] for c in competitors],
+                "P/E":            ["N/A"] + [f"{c['pe']:.1f}" if c["pe"] else "N/A" for c in competitors],
+                "Gross Margin":   ["N/A"] + [f"{round(c['gross_margin']*100,1)}%" if c["gross_margin"] else "N/A" for c in competitors],
+                "Rev Growth":     ["N/A"] + [f"{round(c['rev_growth']*100,1)}%" if c["rev_growth"] else "N/A" for c in competitors],
+            }
+            st.dataframe(comp_data, use_container_width=True)
+
+            # กราฟเปรียบเทียบ Market Cap
+            st.divider()
+            tickers_all = [ticker_input] + [c["ticker"] for c in competitors]
+            caps_all    = [company["market_cap_b"]] + [c["market_cap_b"] for c in competitors]
+            margins_all = [0] + [round(c["gross_margin"]*100,1) if c["gross_margin"] else 0 for c in competitors]
+            colors_cap  = ["#EF9F27" if t == ticker_input else "#85B7EB" for t in tickers_all]
+
+            gc1, gc2 = st.columns(2)
+            with gc1:
+                fig = go.Figure(go.Bar(x=tickers_all, y=caps_all, marker_color=colors_cap,
+                                        text=[f"${v}B" for v in caps_all], textposition="outside"))
+                fig.update_layout(title="Market Cap (B$)", height=280, margin=dict(l=0,r=0,t=40,b=0))
+                st.plotly_chart(fig, use_container_width=True)
+            with gc2:
+                fig = go.Figure(go.Bar(x=tickers_all, y=margins_all,
+                                        marker_color=["#EF9F27" if t == ticker_input else "#1D9E75" for t in tickers_all],
+                                        text=[f"{v}%" for v in margins_all], textposition="outside"))
+                fig.update_layout(title="Gross Margin (%)", height=280, margin=dict(l=0,r=0,t=40,b=0))
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Competitor Agent วิเคราะห์
+            st.divider()
+            with st.spinner("Competitor Agent กำลังวิเคราะห์..."):
+                comp_analysis = competitor_agent(company, competitors)
+            st.markdown(comp_analysis)
+        else:
+            st.info(f"ไม่พบคู่แข่งสำหรับ sector: {company.get('sector', 'N/A')}")
 
     # ===== CHAT TAB =====
     with tab_chat:
