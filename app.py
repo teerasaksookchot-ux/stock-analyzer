@@ -12,6 +12,41 @@ client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 # ===== SESSION CACHE =====
 if "history" not in st.session_state:
     st.session_state["history"] = {}
+if "chat_messages" not in st.session_state:
+    st.session_state["chat_messages"] = {}
+
+# ===== PARSE UPLOADED FILE =====
+def parse_analysis_file(text: str) -> dict | None:
+    try:
+        markers = {
+            "[Financial Analysis]": "fin_result",
+            "[Macro Analysis]":     "mac_result",
+            "[News Analysis]":      "news_result",
+            "[Technical Analysis]": "tech_result",
+            "[CIO Full Report]":    "final",
+        }
+        sections = {v: "" for v in markers.values()}
+        first_line = text.strip().split("\n")[0]
+        parts  = first_line.replace("===", "").strip().split("—")
+        ticker = parts[0].strip()
+        name   = parts[-1].strip() if len(parts) > 1 else "N/A"
+        current = None
+        for line in text.split("\n"):
+            if line.strip() in markers:
+                current = markers[line.strip()]
+                continue
+            if current:
+                sections[current] += line + "\n"
+        for k in sections:
+            sections[k] = sections[k].strip()
+        company = {
+            "ticker": ticker, "name": name,
+            "price": 0, "market_cap_b": 0,
+            "sector": "N/A", "industry": "N/A", "summary": "",
+        }
+        return {"company": company, **sections}
+    except:
+        return None
 
 # ===== SIDEBAR =====
 with st.sidebar:
@@ -19,13 +54,35 @@ with st.sidebar:
     if st.session_state["history"]:
         for saved_ticker in list(st.session_state["history"].keys()):
             col1, col2 = st.sidebar.columns([3, 1])
-            if col1.button(f"{saved_ticker}", key=f"load_{saved_ticker}"):
+            if col1.button(saved_ticker, key=f"load_{saved_ticker}"):
                 st.session_state["load_ticker"] = saved_ticker
             if col2.button("✕", key=f"del_{saved_ticker}"):
                 del st.session_state["history"][saved_ticker]
+                st.session_state["chat_messages"].pop(saved_ticker, None)
                 st.rerun()
     else:
         st.caption("ยังไม่มีประวัติในเซสชันนี้")
+
+    st.divider()
+
+    st.subheader("โหลดไฟล์เก่า")
+    uploaded = st.file_uploader(
+        "อัปโหลดไฟล์ .txt ที่เคย Download ไว้",
+        type=["txt"],
+        help="ไฟล์จากปุ่ม Download ใน CIO Full Report"
+    )
+    if uploaded:
+        text   = uploaded.read().decode("utf-8")
+        parsed = parse_analysis_file(text)
+        if parsed:
+            t = parsed["company"]["ticker"]
+            st.session_state["history"][t] = parsed
+            st.success(f"โหลด {t} สำเร็จ")
+            st.session_state["load_ticker"] = t
+            st.rerun()
+        else:
+            st.error("ไฟล์ไม่ถูกต้อง กรุณาใช้ไฟล์จากปุ่ม Download เท่านั้น")
+
     st.divider()
     st.caption("ปิด browser = ประวัติหาย\nกด Download เพื่อเก็บไฟล์ไว้")
 
@@ -77,6 +134,13 @@ def get_price_summary(hist):
             f"MA20: ${hist['Close'].tail(20).mean():.2f} | "
             f"MA50: ${hist['Close'].tail(50).mean():.2f} | "
             f"Avg Volume: {int(hist['Volume'].mean()):,}")
+
+def get_realtime_price(ticker):
+    try:
+        info = yf.Ticker(ticker).info
+        return info.get("currentPrice") or info.get("regularMarketPrice", 0)
+    except:
+        return 0
 
 def get_news(ticker):
     try:
@@ -273,11 +337,53 @@ def orchestrator_agent(company, fin, mac, news, tech):
 สรุป: 1.น่าลงทุนมั้ย 2.จุดเข้าซื้อ 3.Stop Loss 4.ระดับความเสี่ยง 5.กลยุทธ์
 ตอบเป็นภาษาไทย ละเอียด มีตัวเลขชัดเจน""", 3000)
 
+def chat_agent(ticker, company, fin_result, mac_result, news_result, tech_result, final, messages):
+    """Chat Agent ที่รู้จักผลวิเคราะห์ทั้งหมดและราคา real-time"""
+    realtime_price = get_realtime_price(ticker)
+
+    system_context = f"""คุณเป็น Investment Advisor ผู้เชี่ยวชาญที่วิเคราะห์หุ้น {ticker} ({company['name']}) มาแล้ว
+ราคาปัจจุบัน (real-time): ${realtime_price:.2f}
+
+=== ผลวิเคราะห์จากทีม ===
+
+[Financial Analysis]
+{fin_result}
+
+[Macro Analysis]
+{mac_result}
+
+[News Analysis]
+{news_result}
+
+[Technical Analysis]
+{tech_result}
+
+[CIO Summary]
+{final}
+
+=== คำแนะนำในการตอบ ===
+- ตอบโดยอ้างอิงจากผลวิเคราะห์ข้างต้นเสมอ
+- ใช้ราคา real-time ${realtime_price:.2f} ในการประเมินจุดเข้า/ออก
+- ตอบเป็นภาษาไทย กระชับ ชัดเจน มีตัวเลขอ้างอิง
+- ถ้าคำถามเกินขอบเขตข้อมูลที่มี ให้บอกตรงๆ"""
+
+    api_messages = [{"role": "user", "content": system_context + "\n\nเริ่มการสนทนาได้เลย"}]
+    api_messages.append({"role": "assistant", "content": f"พร้อมแล้วครับ ผมมีข้อมูลวิเคราะห์ {ticker} ครบถ้วน ราคาปัจจุบัน ${realtime_price:.2f} ถามได้เลยครับ"})
+
+    for msg in messages:
+        api_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1500,
+        messages=api_messages
+    )
+    return response.content[0].text
+
 # ===== UI =====
 st.title("Stock Analyzer")
 st.caption("Multi-Agent Analysis powered by Claude")
 
-# โหลดจาก sidebar ถ้ากดประวัติ
 if "load_ticker" in st.session_state:
     ticker_input = st.session_state.pop("load_ticker")
 else:
@@ -285,7 +391,6 @@ else:
 
 if st.button("Analyze", type="primary") and ticker_input:
 
-    # เช็ก cache ก่อน — ถ้ามีไม่เสีย token
     if ticker_input in st.session_state["history"]:
         st.info(f"โหลดผลเก่าของ {ticker_input} (ไม่เสีย token)")
         cached      = st.session_state["history"][ticker_input]
@@ -320,7 +425,6 @@ if st.button("Analyze", type="primary") and ticker_input:
         with st.spinner("Orchestrator สรุปภาพรวม..."):
             final       = orchestrator_agent(company, fin_result, mac_result, news_result, tech_result)
 
-        # บันทึกลง session cache
         st.session_state["history"][ticker_input] = {
             "company":    company,
             "fin_result":  fin_result,
@@ -330,9 +434,13 @@ if st.button("Analyze", type="primary") and ticker_input:
             "final":       final,
         }
 
+    # เริ่ม chat history ถ้ายังไม่มี
+    if ticker_input not in st.session_state["chat_messages"]:
+        st.session_state["chat_messages"][ticker_input] = []
+
     # ===== TABS =====
-    tab_dash, tab_fin, tab_mac, tab_news, tab_tech, tab_full = st.tabs([
-        "Dashboard", "Financial", "Macro", "News", "Technical", "CIO Full Report",
+    tab_dash, tab_fin, tab_mac, tab_news, tab_tech, tab_full, tab_chat = st.tabs([
+        "Dashboard", "Financial", "Macro", "News", "Technical", "CIO Full Report", "Chat"
     ])
 
     # ===== DASHBOARD TAB =====
@@ -370,7 +478,7 @@ if st.button("Analyze", type="primary") and ticker_input:
 
         st.subheader("สรุปภาพรวม — CIO")
         st.markdown(final[:600] + "..." if len(final) > 600 else final)
-        st.info("กดแท็บ **CIO Full Report** ด้านบนเพื่อดูรายงานฉบับเต็ม")
+        st.info("กดแท็บ **CIO Full Report** เพื่อดูรายงานฉบับเต็ม หรือ **Chat** เพื่อถามต่อ")
 
         st.divider()
 
@@ -442,3 +550,44 @@ if st.button("Analyze", type="primary") and ticker_input:
             file_name=f"{ticker_input}_analysis.txt",
             mime="text/plain",
         )
+
+    # ===== CHAT TAB =====
+    with tab_chat:
+        st.subheader(f"Chat กับ Agent — {ticker_input}")
+        st.caption(f"Agent รู้จักผลวิเคราะห์ทั้งหมดและราคา real-time ของ {ticker_input}")
+
+        # ปุ่มล้างประวัติแชท
+        if st.button("ล้างประวัติแชท", key="clear_chat"):
+            st.session_state["chat_messages"][ticker_input] = []
+            st.rerun()
+
+        # แสดงประวัติแชท
+        chat_container = st.container()
+        with chat_container:
+            for msg in st.session_state["chat_messages"][ticker_input]:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+
+        # ช่องพิมพ์คำถาม
+        if prompt := st.chat_input(f"ถามเกี่ยวกับ {ticker_input} ได้เลย..."):
+            # เพิ่มคำถามผู้ใช้
+            st.session_state["chat_messages"][ticker_input].append({
+                "role": "user", "content": prompt
+            })
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # เรียก Chat Agent
+            with st.chat_message("assistant"):
+                with st.spinner("กำลังคิด..."):
+                    reply = chat_agent(
+                        ticker_input, company,
+                        fin_result, mac_result, news_result, tech_result, final,
+                        st.session_state["chat_messages"][ticker_input][:-1]
+                    )
+                st.markdown(reply)
+
+            # บันทึกคำตอบ
+            st.session_state["chat_messages"][ticker_input].append({
+                "role": "assistant", "content": reply
+            })
