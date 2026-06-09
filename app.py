@@ -24,6 +24,7 @@ def parse_analysis_file(text: str) -> dict | None:
             "[News Analysis]":      "news_result",
             "[Technical Analysis]": "tech_result",
             "[CIO Full Report]":    "final",
+            "[Chat History]":       "chat_raw",
         }
         sections = {v: "" for v in markers.values()}
         first_line = text.strip().split("\n")[0]
@@ -39,12 +40,42 @@ def parse_analysis_file(text: str) -> dict | None:
                 sections[current] += line + "\n"
         for k in sections:
             sections[k] = sections[k].strip()
+
+        # แปลง Chat History กลับเป็น list of dicts
+        chat_messages = []
+        if sections["chat_raw"]:
+            current_role    = None
+            current_content = []
+            for line in sections["chat_raw"].split("\n"):
+                if line.startswith("User: "):
+                    if current_role:
+                        chat_messages.append({"role": current_role, "content": "\n".join(current_content).strip()})
+                    current_role    = "user"
+                    current_content = [line[6:]]
+                elif line.startswith("Agent: "):
+                    if current_role:
+                        chat_messages.append({"role": current_role, "content": "\n".join(current_content).strip()})
+                    current_role    = "assistant"
+                    current_content = [line[7:]]
+                elif current_role:
+                    current_content.append(line)
+            if current_role and current_content:
+                chat_messages.append({"role": current_role, "content": "\n".join(current_content).strip()})
+
         company = {
             "ticker": ticker, "name": name,
             "price": 0, "market_cap_b": 0,
             "sector": "N/A", "industry": "N/A", "summary": "",
         }
-        return {"company": company, **sections}
+        return {
+            "company":      company,
+            "fin_result":   sections["fin_result"],
+            "mac_result":   sections["mac_result"],
+            "news_result":  sections["news_result"],
+            "tech_result":  sections["tech_result"],
+            "final":        sections["final"],
+            "chat_messages": chat_messages,
+        }
     except:
         return None
 
@@ -77,7 +108,11 @@ with st.sidebar:
         if parsed:
             t = parsed["company"]["ticker"]
             st.session_state["history"][t] = parsed
-            st.success(f"โหลด {t} สำเร็จ")
+            if parsed.get("chat_messages"):
+                st.session_state["chat_messages"][t] = parsed["chat_messages"]
+                st.success(f"โหลด {t} สำเร็จ (มีประวัติแชท {len(parsed['chat_messages'])} ข้อความ)")
+            else:
+                st.success(f"โหลด {t} สำเร็จ")
             st.session_state["load_ticker"] = t
             st.rerun()
         else:
@@ -528,6 +563,17 @@ if st.button("Analyze", type="primary") and ticker_input:
         st.subheader(f"CIO Full Report — {ticker_input}")
         st.markdown(final)
         st.divider()
+
+        # แปลง chat history เป็น text
+        chat_history_text = ""
+        msgs = st.session_state["chat_messages"].get(ticker_input, [])
+        if msgs:
+            lines = []
+            for msg in msgs:
+                prefix = "User: " if msg["role"] == "user" else "Agent: "
+                lines.append(f"{prefix}{msg['content']}")
+            chat_history_text = "\n".join(lines)
+
         full_text = f"""=== {ticker_input} — {company['name']} ===
 
 [Financial Analysis]
@@ -543,13 +589,19 @@ if st.button("Analyze", type="primary") and ticker_input:
 {tech_result}
 
 [CIO Full Report]
-{final}"""
+{final}
+
+[Chat History]
+{chat_history_text}"""
+
         st.download_button(
-            label="Download ผลวิเคราะห์เป็น .txt",
+            label="Download ผลวิเคราะห์ + บทสนทนา เป็น .txt",
             data=full_text.encode("utf-8"),
             file_name=f"{ticker_input}_analysis.txt",
             mime="text/plain",
         )
+        if msgs:
+            st.caption(f"ไฟล์นี้รวมบทสนทนา {len(msgs)} ข้อความไว้ด้วย Upload กลับมาคุยต่อได้เลย")
 
     # ===== CHAT TAB =====
     with tab_chat:
