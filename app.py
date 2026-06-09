@@ -12,11 +12,131 @@ from scipy.signal import argrelextrema
 st.set_page_config(page_title="Stock Analyzer", layout="wide")
 client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
+
+# ===== SUPABASE DATABASE =====
+@st.cache_resource
+def get_supabase():
+    """เชื่อมต่อ Supabase — คืน None ถ้าไม่ได้ตั้งค่า"""
+    try:
+        from supabase import create_client
+        url = st.secrets.get("SUPABASE_URL", "")
+        key = st.secrets.get("SUPABASE_KEY", "")
+        if not url or not key:
+            return None
+        return create_client(url, key)
+    except:
+        return None
+
+def db_save_analysis(ticker, company, fin, mac, geo, insider, news, tech, final):
+    db = get_supabase()
+    if not db:
+        return
+    try:
+        db.table("analyses").delete().eq("ticker", ticker).execute()
+        db.table("analyses").insert({
+            "ticker":         ticker,
+            "company_name":   company.get("name", ""),
+            "price":          company.get("price", 0),
+            "market_cap_b":   company.get("market_cap_b", 0),
+            "sector":         company.get("sector", ""),
+            "industry":       company.get("industry", ""),
+            "fin_result":     fin,
+            "mac_result":     mac,
+            "geo_result":     geo,
+            "insider_result": insider,
+            "news_result":    news,
+            "tech_result":    tech,
+            "final":          final,
+            "analyzed_at":    datetime.now().isoformat(),
+        }).execute()
+    except Exception as e:
+        st.warning(f"DB save error: {e}")
+
+def db_load_analysis(ticker) -> dict | None:
+    db = get_supabase()
+    if not db:
+        return None
+    try:
+        r = db.table("analyses").select("*").eq("ticker", ticker).limit(1).execute()
+        return r.data[0] if r.data else None
+    except:
+        return None
+
+def db_load_all_tickers() -> list:
+    db = get_supabase()
+    if not db:
+        return []
+    try:
+        r = db.table("analyses").select("ticker, company_name, price, analyzed_at").order("analyzed_at", desc=True).execute()
+        return r.data or []
+    except:
+        return []
+
+def db_save_chat(ticker, messages):
+    db = get_supabase()
+    if not db:
+        return
+    try:
+        db.table("chat_messages").delete().eq("ticker", ticker).execute()
+        if messages:
+            db.table("chat_messages").insert([
+                {"ticker": ticker, "role": m["role"], "content": m["content"]}
+                for m in messages
+            ]).execute()
+    except:
+        pass
+
+def db_load_chat(ticker) -> list:
+    db = get_supabase()
+    if not db:
+        return []
+    try:
+        r = db.table("chat_messages").select("role, content").eq("ticker", ticker).order("id").execute()
+        return [{"role": x["role"], "content": x["content"]} for x in r.data] if r.data else []
+    except:
+        return []
+
+def db_save_alerts(alerts):
+    db = get_supabase()
+    if not db:
+        return
+    try:
+        db.table("alerts").delete().eq("is_active", True).execute()
+        if alerts:
+            db.table("alerts").insert([{
+                "ticker":       a["ticker"],
+                "target_price": a["target"],
+                "direction":    a["direction"],
+                "label":        a.get("label", ""),
+                "is_active":    True,
+            } for a in alerts]).execute()
+    except:
+        pass
+
+def db_load_alerts() -> list:
+    db = get_supabase()
+    if not db:
+        return []
+    try:
+        r = db.table("alerts").select("*").eq("is_active", True).execute()
+        return [{"ticker": x["ticker"], "target": x["target_price"],
+                 "direction": x["direction"], "label": x["label"]}
+                for x in r.data] if r.data else []
+    except:
+        return []
+
+def db_connected() -> bool:
+    return get_supabase() is not None
+
 # ===== SESSION CACHE =====
 if "history" not in st.session_state:
     st.session_state["history"] = {}
 if "chat_messages" not in st.session_state:
     st.session_state["chat_messages"] = {}
+if "alerts" not in st.session_state:
+    st.session_state["alerts"] = db_load_alerts()
+if "db_history_loaded" not in st.session_state:
+    st.session_state["db_history_loaded"] = False
 
 # ===== PARSE UPLOADED FILE =====
 def parse_analysis_file(text: str) -> dict | None:
@@ -25,6 +145,7 @@ def parse_analysis_file(text: str) -> dict | None:
             "[Financial Analysis]":    "fin_result",
             "[Macro Analysis]":        "mac_result",
             "[Geopolitical Analysis]": "geo_result",
+            "[Insider Analysis]":      "insider_result",
             "[News Analysis]":         "news_result",
             "[Technical Analysis]":    "tech_result",
             "[CIO Full Report]":       "final",
@@ -72,40 +193,71 @@ def parse_analysis_file(text: str) -> dict | None:
             "sector": "N/A", "industry": "N/A", "summary": "",
         }
         return {
-            "company":      company,
-            "fin_result":   sections["fin_result"],
-            "mac_result":   sections["mac_result"],
-            "geo_result":   sections["geo_result"],
-            "news_result":  sections["news_result"],
-            "tech_result":  sections["tech_result"],
-            "final":        sections["final"],
-            "chat_messages": chat_messages,
+            "company":        company,
+            "fin_result":     sections["fin_result"],
+            "mac_result":     sections["mac_result"],
+            "geo_result":     sections["geo_result"],
+            "insider_result": sections["insider_result"],
+            "news_result":    sections["news_result"],
+            "tech_result":    sections["tech_result"],
+            "final":          sections["final"],
+            "chat_messages":  chat_messages,
         }
     except:
         return None
 
 # ===== SIDEBAR =====
 with st.sidebar:
-    st.subheader("ประวัติการวิเคราะห์")
-    if st.session_state["history"]:
-        for saved_ticker in list(st.session_state["history"].keys()):
-            col1, col2 = st.sidebar.columns([3, 1])
-            if col1.button(saved_ticker, key=f"load_{saved_ticker}"):
-                st.session_state["load_ticker"] = saved_ticker
-            if col2.button("✕", key=f"del_{saved_ticker}"):
-                del st.session_state["history"][saved_ticker]
-                st.session_state["chat_messages"].pop(saved_ticker, None)
-                st.rerun()
+
+    # ===== DB STATUS =====
+    if db_connected():
+        st.success("🗄 Database เชื่อมต่อแล้ว", icon="✅")
     else:
-        st.caption("ยังไม่มีประวัติในเซสชันนี้")
+        st.warning("🗄 Database ยังไม่ได้ตั้งค่า", icon="⚠️")
 
     st.divider()
 
-    st.subheader("โหลดไฟล์เก่า")
+    # ===== DB HISTORY =====
+    st.subheader("📋 ประวัติทั้งหมด (Database)")
+    if db_connected():
+        db_tickers = db_load_all_tickers()
+        if db_tickers:
+            for row in db_tickers:
+                t   = row["ticker"]
+                dt  = row.get("analyzed_at", "")[:10]
+                px  = row.get("price", 0)
+                col1, col2 = st.sidebar.columns([3, 1])
+                if col1.button(f"{t}  ${px:.0f}  {dt}", key=f"dbload_{t}"):
+                    st.session_state["load_ticker"] = t
+                if col2.button("✕", key=f"dbdel_{t}"):
+                    get_supabase().table("analyses").delete().eq("ticker", t).execute()
+                    get_supabase().table("chat_messages").delete().eq("ticker", t).execute()
+                    st.rerun()
+        else:
+            st.caption("ยังไม่มีประวัติใน Database")
+    else:
+        st.caption("ตั้งค่า Supabase เพื่อดูประวัติถาวร")
+        if st.session_state["history"]:
+            st.caption("─── Session (หายเมื่อปิด browser) ───")
+            for saved_ticker in list(st.session_state["history"].keys()):
+                col1, col2 = st.sidebar.columns([3, 1])
+                if col1.button(saved_ticker, key=f"load_{saved_ticker}"):
+                    st.session_state["load_ticker"] = saved_ticker
+                if col2.button("✕", key=f"del_{saved_ticker}"):
+                    del st.session_state["history"][saved_ticker]
+                    st.session_state["chat_messages"].pop(saved_ticker, None)
+                    st.rerun()
+
+    st.divider()
+
+    # ===== FILE UPLOAD (แยกส่วนชัดเจน) =====
+    st.subheader("📂 อัปโหลดไฟล์เก่า")
+    st.caption("สำหรับไฟล์ .txt ที่เคย Download ไว้")
     uploaded = st.file_uploader(
-        "อัปโหลดไฟล์ .txt ที่เคย Download ไว้",
+        "เลือกไฟล์ .txt",
         type=["txt"],
-        help="ไฟล์จากปุ่ม Download ใน CIO Full Report"
+        help="ไฟล์จากปุ่ม Download ใน CIO Full Report",
+        label_visibility="collapsed",
     )
     if uploaded:
         text   = uploaded.read().decode("utf-8")
@@ -115,16 +267,188 @@ with st.sidebar:
             st.session_state["history"][t] = parsed
             if parsed.get("chat_messages"):
                 st.session_state["chat_messages"][t] = parsed["chat_messages"]
-                st.success(f"โหลด {t} สำเร็จ (มีประวัติแชท {len(parsed['chat_messages'])} ข้อความ)")
+                st.success(f"โหลด {t} สำเร็จ ({len(parsed['chat_messages'])} ข้อความ)")
             else:
                 st.success(f"โหลด {t} สำเร็จ")
             st.session_state["load_ticker"] = t
             st.rerun()
         else:
-            st.error("ไฟล์ไม่ถูกต้อง กรุณาใช้ไฟล์จากปุ่ม Download เท่านั้น")
+            st.error("ไฟล์ไม่ถูกต้อง — ใช้ได้เฉพาะไฟล์จากปุ่ม Download")
+
+    st.divider()
+
+    # ===== ALERT SECTION =====
+    st.subheader("⚡ Price Alert")
+
+    has_telegram = bool(st.secrets.get("TELEGRAM_TOKEN")) and bool(st.secrets.get("TELEGRAM_CHAT_ID"))
+    if not has_telegram:
+        with st.expander("ตั้งค่า Telegram ก่อนใช้งาน"):
+            st.caption("""1. สร้าง bot ที่ @BotFather → /newbot\n2. Copy token ที่ได้\n3. ไปที่ Streamlit Cloud → Settings → Secrets ใส่:\n   TELEGRAM_TOKEN = "your_token"\n   TELEGRAM_CHAT_ID = "your_chat_id"\n4. หา chat_id: เปิด t.me/userinfobot แล้วกด Start""")
+
+    with st.form("alert_form", clear_on_submit=True):
+        a_ticker    = st.text_input("Ticker", placeholder="เช่น IONQ").upper().strip()
+        a_target    = st.number_input("ราคาเป้าหมาย $", min_value=0.01, step=0.5)
+        a_direction = st.selectbox("เมื่อราคา", ["ลงถึง (Buy Zone) ↓", "ขึ้นถึง (Take Profit) ↑"])
+        a_label     = st.text_input("หมายเหตุ (เช่น Zone A)", placeholder="ไม่บังคับ")
+        submitted   = st.form_submit_button("➕ ตั้ง Alert", use_container_width=True)
+        if submitted and a_ticker and a_target > 0:
+            direction = "below" if "ลงถึง" in a_direction else "above"
+            new_alert = {
+                "ticker":    a_ticker,
+                "target":    a_target,
+                "direction": direction,
+                "label":     a_label or f"{a_ticker} @ ${a_target}",
+            }
+            st.session_state["alerts"].append(new_alert)
+            db_save_alerts(st.session_state["alerts"])
+            st.success(f"ตั้ง Alert {a_ticker} @ ${a_target} แล้ว")
+
+    # แสดง alerts ที่ตั้งไว้
+    if st.session_state["alerts"]:
+        st.caption(f"Alerts ที่ตั้งไว้ {len(st.session_state['alerts'])} รายการ")
+        for i, al in enumerate(st.session_state["alerts"]):
+            arrow = "↓" if al["direction"] == "below" else "↑"
+            c1, c2 = st.columns([4, 1])
+            c1.caption(f"{al['ticker']} {arrow} ${al['target']} — {al['label']}")
+            if c2.button("✕", key=f"del_alert_{i}"):
+                st.session_state["alerts"].pop(i)
+                db_save_alerts(st.session_state["alerts"])
+                st.rerun()
+
+        if st.button("🔔 เช็ค Alert ทั้งหมด", use_container_width=True):
+            triggered = check_alerts()
+            if triggered:
+                for t in triggered:
+                    arrow  = "ลงถึง" if t["direction"] == "below" else "ขึ้นถึง"
+                    msg    = (f"🔔 <b>Stock Alert!</b>\n"
+                              f"<b>{t['ticker']}</b> {arrow} เป้า ${t['target']:.2f}\n"
+                              f"ราคาปัจจุบัน: <b>${t['current_price']:.2f}</b>\n"
+                              f"หมายเหตุ: {t['label']}")
+                    ok = send_telegram(msg)
+                    if ok:
+                        st.success(f"ส่ง Telegram แล้ว: {t['ticker']} @ ${t['current_price']:.2f}")
+                    else:
+                        st.warning(f"{t['ticker']} ถึงเป้า ${t['target']:.2f} แต่ส่ง Telegram ไม่ได้ (ตรวจ secrets)")
+            else:
+                st.info("ยังไม่มี alert ที่ถึงเป้า")
 
     st.divider()
     st.caption("ปิด browser = ประวัติหาย\nกด Download เพื่อเก็บไฟล์ไว้")
+
+
+# ===== ALERT SYSTEM =====
+
+def send_telegram(message: str) -> bool:
+    """ส่ง alert ผ่าน Telegram Bot"""
+    try:
+        token   = st.secrets.get("TELEGRAM_TOKEN", "")
+        chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
+        if not token or not chat_id:
+            return False
+        url  = f"https://api.telegram.org/bot{token}/sendMessage"
+        resp = requests.post(url, json={
+            "chat_id":    chat_id,
+            "text":       message,
+            "parse_mode": "HTML",
+        }, timeout=5)
+        return resp.status_code == 200
+    except:
+        return False
+
+def check_alerts() -> list[dict]:
+    """เช็ค alerts ทั้งหมดและคืน list ที่ถึงเป้า"""
+    triggered = []
+    alerts    = st.session_state.get("alerts", [])
+    for alert in alerts:
+        try:
+            price = get_realtime_price(alert["ticker"])
+            if price <= 0:
+                continue
+            hit = (alert["direction"] == "below" and price <= alert["target"]) or                   (alert["direction"] == "above" and price >= alert["target"])
+            if hit:
+                triggered.append({**alert, "current_price": price})
+        except:
+            pass
+    return triggered
+
+
+# ===== INSIDER & SHORT INTEREST =====
+
+@st.cache_data(ttl=3600)
+def get_insider_short_data(ticker):
+    """ดึงข้อมูล insider trading และ short interest"""
+    try:
+        stock = yf.Ticker(ticker)
+        info  = stock.info
+
+        # Short Interest
+        short_pct   = info.get("shortPercentOfFloat", 0) or 0
+        short_ratio = info.get("shortRatio", 0) or 0
+        shares_short = info.get("sharesShort", 0) or 0
+
+        # Insider Transactions
+        try:
+            insider_tx = stock.insider_transactions
+            if insider_tx is not None and not insider_tx.empty:
+                insider_str = insider_tx.head(10).to_string()
+            else:
+                insider_str = "ไม่มีข้อมูล"
+        except:
+            insider_str = "ไม่มีข้อมูล"
+
+        # Insider Purchases Summary
+        try:
+            insider_buy = stock.insider_purchases
+            insider_buy_str = insider_buy.to_string() if insider_buy is not None and not insider_buy.empty else "ไม่มีข้อมูล"
+        except:
+            insider_buy_str = "ไม่มีข้อมูล"
+
+        # Institutional Holders
+        try:
+            inst = stock.institutional_holders
+            inst_str = inst.head(10).to_string() if inst is not None and not inst.empty else "ไม่มีข้อมูล"
+        except:
+            inst_str = "ไม่มีข้อมูล"
+
+        return {
+            "short_pct_float": round(short_pct * 100, 1),
+            "short_ratio":     round(short_ratio, 1),
+            "shares_short":    shares_short,
+            "insider_tx":      insider_str,
+            "insider_buy":     insider_buy_str,
+            "institutional":   inst_str,
+        }
+    except:
+        return None
+
+def insider_agent(company, insider_data):
+    """วิเคราะห์ insider trading และ short interest"""
+    if not insider_data:
+        return "ไม่มีข้อมูล insider"
+    return run_agent(f"""คุณเป็น Insider & Market Structure Analyst
+วิเคราะห์ข้อมูล insider trading และ short interest ของ {company['ticker']} ({company['name']})
+
+=== Short Interest ===
+Short % of Float: {insider_data['short_pct_float']}%
+Short Ratio (days to cover): {insider_data['short_ratio']} วัน
+Shares Short: {insider_data['shares_short']:,}
+
+=== Insider Transactions (ล่าสุด 10 รายการ) ===
+{insider_data['insider_tx']}
+
+=== Insider Buy/Sell Summary ===
+{insider_data['insider_buy']}
+
+=== Institutional Holders (Top 10) ===
+{insider_data['institutional']}
+
+วิเคราะห์:
+1. Insider ซื้อหรือขายสุทธิ — สัญญาณบวก/ลบ
+2. Short % of Float สูงมั้ย — ความเสี่ยง Short Squeeze
+3. สถาบันใหญ่ถือมากน้อยแค่ไหน — confidence ของ smart money
+4. สรุป: ภาพรวม insider และ market structure บ่งชี้อะไร
+
+ตอบเป็นภาษาไทย กระชับ มีตัวเลขอ้างอิง""", 800)
 
 # ===== DATA NODES =====
 
@@ -732,7 +1056,7 @@ Sector: {company['sector']} | Industry: {company['industry']}
 ตอบเป็นภาษาไทย ละเอียด มีเหตุผลชัดเจน""", 1000)
 
 
-def chat_agent(ticker, company, fin_result, mac_result, geo_result, news_result, tech_result, final, messages, earnings_date="N/A"):
+def chat_agent(ticker, company, fin_result, mac_result, geo_result, insider_result, news_result, tech_result, final, messages, earnings_date="N/A"):
     """Chat Agent ที่รู้จักผลวิเคราะห์ทั้งหมดและราคา real-time"""
     realtime_price = get_realtime_price(ticker)
 
@@ -756,6 +1080,9 @@ def chat_agent(ticker, company, fin_result, mac_result, geo_result, news_result,
 
 [Geopolitical Risk]
 {geo_result}
+
+[Insider & Short Interest]
+{insider_result}
 
 [CIO Summary]
 {final}
@@ -800,7 +1127,8 @@ if st.button("Analyze", type="primary") and ticker_input:
         news_result = cached["news_result"]
         tech_result = cached["tech_result"]
         final       = cached["final"]
-        earnings_date = "N/A"
+        earnings_date  = "N/A"
+        insider_result = cached.get("insider_result", "ไม่มีข้อมูล insider")
         hist, fin, bs, cf = get_chart_data(ticker_input)
 
     else:
@@ -820,6 +1148,7 @@ if st.button("Analyze", type="primary") and ticker_input:
             macro             = get_macro_data()
             yield_curve       = get_yield_curve()
             geo_indicators    = get_geopolitical_indicators()
+            insider_data      = get_insider_short_data(ticker_input)
 
         with st.spinner("Financial Agent (+ Quarterly + Analyst)..."):
             fin_result  = financial_agent(company, financials, quarterly, analyst)
@@ -830,27 +1159,33 @@ if st.button("Analyze", type="primary") and ticker_input:
         with st.spinner("Technical Agent (+ RSI/MACD/ATR/Stochastic)..."):
             tech_result = technical_agent(company, price_summary, indicators)
         with st.spinner("Geopolitical Agent (+ War/Policy/Supply Chain)..."):
-            geo_result  = geopolitical_agent(company, geo_indicators, news)
+            geo_result     = geopolitical_agent(company, geo_indicators, news)
+        with st.spinner("Insider Agent (+ Short Interest/Institutional)..."):
+            insider_result = insider_agent(company, insider_data)
         with st.spinner("Orchestrator สรุปภาพรวม (ทุก Agent)..."):
             final       = orchestrator_agent(company, fin_result, mac_result, geo_result, news_result, tech_result)
 
         st.session_state["history"][ticker_input] = {
-            "company":    company,
-            "fin_result":  fin_result,
-            "mac_result":  mac_result,
-            "geo_result":  geo_result,
-            "news_result": news_result,
-            "tech_result": tech_result,
-            "final":       final,
+            "company":        company,
+            "fin_result":     fin_result,
+            "mac_result":     mac_result,
+            "geo_result":     geo_result,
+            "insider_result": insider_result,
+            "news_result":    news_result,
+            "tech_result":    tech_result,
+            "final":          final,
         }
+        # บันทึกลง Supabase ถ้าเชื่อมต่ออยู่
+        db_save_analysis(ticker_input, company, fin_result, mac_result,
+                         geo_result, insider_result, news_result, tech_result, final)
 
     # เริ่ม chat history ถ้ายังไม่มี
     if ticker_input not in st.session_state["chat_messages"]:
         st.session_state["chat_messages"][ticker_input] = []
 
     # ===== TABS =====
-    tab_dash, tab_fin, tab_mac, tab_geo, tab_news, tab_tech, tab_full, tab_comp, tab_chat = st.tabs([
-        "Dashboard", "Financial", "Macro", "Geopolitical", "News", "Technical", "CIO Full Report", "Competitors", "Chat"
+    tab_dash, tab_fin, tab_mac, tab_geo, tab_insider, tab_news, tab_tech, tab_full, tab_comp, tab_chat = st.tabs([
+        "Dashboard", "Financial", "Macro", "Geopolitical", "Insider", "News", "Technical", "CIO Full Report", "Competitors", "Chat"
     ])
 
     # ===== DASHBOARD TAB =====
@@ -913,6 +1248,11 @@ if st.button("Analyze", type="primary") and ticker_input:
             with st.expander("ดูรายละเอียด Geopolitical"):
                 st.markdown(geo_result)
 
+            st.markdown("**Insider Agent**")
+            st.markdown(insider_result[:300] + "...")
+            with st.expander("ดูรายละเอียด Insider"):
+                st.markdown(insider_result)
+
             st.markdown("**News Agent**")
             st.markdown(news_result[:300] + "...")
             with st.expander("ดูรายละเอียด News"):
@@ -936,6 +1276,19 @@ if st.button("Analyze", type="primary") and ticker_input:
         st.subheader(f"Geopolitical Risk — {ticker_input}")
         st.caption("วิเคราะห์ความเสี่ยงสงคราม นโยบายรัฐ และภูมิรัฐศาสตร์โลก")
         st.markdown(geo_result)
+
+    with tab_insider:
+        st.subheader(f"Insider & Market Structure — {ticker_input}")
+        if insider_data:
+            ic1, ic2, ic3 = st.columns(3)
+            ic1.metric("Short % of Float",  f"{insider_data['short_pct_float']}%",
+                        delta="⚠ สูง" if insider_data['short_pct_float'] > 15 else "ปกติ")
+            ic2.metric("Days to Cover",     f"{insider_data['short_ratio']} วัน",
+                        delta="⚠ ระวัง" if insider_data['short_ratio'] > 5 else "ปกติ")
+            ic3.metric("Shares Short",      f"{insider_data['shares_short']:,}")
+            st.divider()
+
+        st.markdown(insider_result)
 
     with tab_news:
         st.subheader(f"News & Sentiment — {ticker_input}")
@@ -970,6 +1323,9 @@ if st.button("Analyze", type="primary") and ticker_input:
 
 [Geopolitical Analysis]
 {geo_result}
+
+[Insider Analysis]
+{insider_result}
 
 [News Analysis]
 {news_result}
@@ -1071,7 +1427,7 @@ if st.button("Analyze", type="primary") and ticker_input:
                 with st.spinner("กำลังคิด..."):
                     reply = chat_agent(
                         ticker_input, company,
-                        fin_result, mac_result, geo_result, news_result, tech_result, final,
+                        fin_result, mac_result, geo_result, insider_result, news_result, tech_result, final,
                         st.session_state["chat_messages"][ticker_input][:-1],
                         earnings_date
                     )
@@ -1081,3 +1437,5 @@ if st.button("Analyze", type="primary") and ticker_input:
             st.session_state["chat_messages"][ticker_input].append({
                 "role": "assistant", "content": reply
             })
+            # sync ลง DB
+            db_save_chat(ticker_input, st.session_state["chat_messages"][ticker_input])
