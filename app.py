@@ -9,6 +9,26 @@ from scipy.signal import argrelextrema
 st.set_page_config(page_title="Stock Analyzer", layout="wide")
 client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
+# ===== SESSION CACHE =====
+if "history" not in st.session_state:
+    st.session_state["history"] = {}
+
+# ===== SIDEBAR =====
+with st.sidebar:
+    st.subheader("ประวัติการวิเคราะห์")
+    if st.session_state["history"]:
+        for saved_ticker in list(st.session_state["history"].keys()):
+            col1, col2 = st.sidebar.columns([3, 1])
+            if col1.button(f"{saved_ticker}", key=f"load_{saved_ticker}"):
+                st.session_state["load_ticker"] = saved_ticker
+            if col2.button("✕", key=f"del_{saved_ticker}"):
+                del st.session_state["history"][saved_ticker]
+                st.rerun()
+    else:
+        st.caption("ยังไม่มีประวัติในเซสชันนี้")
+    st.divider()
+    st.caption("ปิด browser = ประวัติหาย\nกด Download เพื่อเก็บไฟล์ไว้")
+
 # ===== DATA NODES =====
 
 def get_company_info(ticker):
@@ -111,19 +131,19 @@ def draw_chart(name, ticker, hist, fin, bs, cf):
 
     if name == "ราคา + MA":
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"],                     name="ราคา", line=dict(color="#378ADD", width=2)))
-        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"].rolling(20).mean(),  name="MA20", line=dict(color="#EF9F27", dash="dash")))
-        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"].rolling(50).mean(),  name="MA50", line=dict(color="#1D9E75", dash="dash")))
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"],                    name="ราคา", line=dict(color="#378ADD", width=2)))
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"].rolling(20).mean(), name="MA20", line=dict(color="#EF9F27", dash="dash")))
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"].rolling(50).mean(), name="MA50", line=dict(color="#1D9E75", dash="dash")))
         fig.update_layout(title=f"{ticker} ราคา + MA", height=H, margin=M)
         st.plotly_chart(fig, use_container_width=True)
 
     elif name == "Bollinger Bands":
         ma, upper, lower = calc_bollinger(hist)
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=hist.index, y=upper,  name="Upper", line=dict(color="#E24B4A", dash="dash", width=1)))
-        fig.add_trace(go.Scatter(x=hist.index, y=lower,  name="Lower", line=dict(color="#1D9E75", dash="dash", width=1), fill="tonexty", fillcolor="rgba(29,158,117,0.06)"))
-        fig.add_trace(go.Scatter(x=hist.index, y=ma,     name="MA20",  line=dict(color="#EF9F27", width=1)))
-        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"], name="ราคา", line=dict(color="#378ADD", width=2)))
+        fig.add_trace(go.Scatter(x=hist.index, y=upper,         name="Upper", line=dict(color="#E24B4A", dash="dash", width=1)))
+        fig.add_trace(go.Scatter(x=hist.index, y=lower,         name="Lower", line=dict(color="#1D9E75", dash="dash", width=1), fill="tonexty", fillcolor="rgba(29,158,117,0.06)"))
+        fig.add_trace(go.Scatter(x=hist.index, y=ma,            name="MA20",  line=dict(color="#EF9F27", width=1)))
+        fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"], name="ราคา",  line=dict(color="#378ADD", width=2)))
         fig.update_layout(title="Bollinger Bands (20,2)", height=H, margin=M)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -257,46 +277,66 @@ def orchestrator_agent(company, fin, mac, news, tech):
 st.title("Stock Analyzer")
 st.caption("Multi-Agent Analysis powered by Claude")
 
-ticker_input = st.text_input("ใส่ ticker", placeholder="เช่น BE, NVDA, TSLA").upper().strip()
+# โหลดจาก sidebar ถ้ากดประวัติ
+if "load_ticker" in st.session_state:
+    ticker_input = st.session_state.pop("load_ticker")
+else:
+    ticker_input = st.text_input("ใส่ ticker", placeholder="เช่น BE, NVDA, TSLA").upper().strip()
 
 if st.button("Analyze", type="primary") and ticker_input:
 
-    with st.spinner("กำลังดึงข้อมูล..."):
-        company = get_company_info(ticker_input)
-        if not company:
-            st.error(f"ไม่พบข้อมูล {ticker_input}")
-            st.stop()
-        financials        = get_financials(ticker_input)
+    # เช็ก cache ก่อน — ถ้ามีไม่เสีย token
+    if ticker_input in st.session_state["history"]:
+        st.info(f"โหลดผลเก่าของ {ticker_input} (ไม่เสีย token)")
+        cached      = st.session_state["history"][ticker_input]
+        company     = cached["company"]
+        fin_result  = cached["fin_result"]
+        mac_result  = cached["mac_result"]
+        news_result = cached["news_result"]
+        tech_result = cached["tech_result"]
+        final       = cached["final"]
         hist, fin, bs, cf = get_chart_data(ticker_input)
-        price_summary     = get_price_summary(hist)
-        news              = get_news(ticker_input)
-        macro             = get_macro_data()
 
-    with st.spinner("Financial Agent..."):
-        fin_result  = financial_agent(company, financials)
-    with st.spinner("Macro Agent..."):
-        mac_result  = macro_agent(company, macro)
-    with st.spinner("News Agent..."):
-        news_result = news_agent(company, news)
-    with st.spinner("Technical Agent..."):
-        tech_result = technical_agent(company, price_summary)
-    with st.spinner("Orchestrator สรุปภาพรวม..."):
-        final       = orchestrator_agent(company, fin_result, mac_result, news_result, tech_result)
+    else:
+        with st.spinner("กำลังดึงข้อมูล..."):
+            company = get_company_info(ticker_input)
+            if not company:
+                st.error(f"ไม่พบข้อมูล {ticker_input}")
+                st.stop()
+            financials        = get_financials(ticker_input)
+            hist, fin, bs, cf = get_chart_data(ticker_input)
+            price_summary     = get_price_summary(hist)
+            news              = get_news(ticker_input)
+            macro             = get_macro_data()
+
+        with st.spinner("Financial Agent..."):
+            fin_result  = financial_agent(company, financials)
+        with st.spinner("Macro Agent..."):
+            mac_result  = macro_agent(company, macro)
+        with st.spinner("News Agent..."):
+            news_result = news_agent(company, news)
+        with st.spinner("Technical Agent..."):
+            tech_result = technical_agent(company, price_summary)
+        with st.spinner("Orchestrator สรุปภาพรวม..."):
+            final       = orchestrator_agent(company, fin_result, mac_result, news_result, tech_result)
+
+        # บันทึกลง session cache
+        st.session_state["history"][ticker_input] = {
+            "company":    company,
+            "fin_result":  fin_result,
+            "mac_result":  mac_result,
+            "news_result": news_result,
+            "tech_result": tech_result,
+            "final":       final,
+        }
 
     # ===== TABS =====
     tab_dash, tab_fin, tab_mac, tab_news, tab_tech, tab_full = st.tabs([
-        "Dashboard",
-        "Financial",
-        "Macro",
-        "News",
-        "Technical",
-        "CIO Full Report",
+        "Dashboard", "Financial", "Macro", "News", "Technical", "CIO Full Report",
     ])
 
     # ===== DASHBOARD TAB =====
     with tab_dash:
-
-        # Metric cards
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("ราคา",       f"${company['price']:.2f}")
         c2.metric("Market Cap", f"${company['market_cap_b']:.1f}B")
@@ -305,7 +345,6 @@ if st.button("Analyze", type="primary") and ticker_input:
 
         st.divider()
 
-        # Chart selector
         st.subheader("กราฟ")
         ALL_CHARTS = [
             "ราคา + MA", "Bollinger Bands", "Trendline",
@@ -329,14 +368,12 @@ if st.button("Analyze", type="primary") and ticker_input:
 
         st.divider()
 
-        # CIO Summary
         st.subheader("สรุปภาพรวม — CIO")
         st.markdown(final[:600] + "..." if len(final) > 600 else final)
         st.info("กดแท็บ **CIO Full Report** ด้านบนเพื่อดูรายงานฉบับเต็ม")
 
         st.divider()
 
-        # Agent quick summaries
         st.subheader("สรุปจาก Agents")
         a1, a2 = st.columns(2)
 
@@ -382,3 +419,26 @@ if st.button("Analyze", type="primary") and ticker_input:
     with tab_full:
         st.subheader(f"CIO Full Report — {ticker_input}")
         st.markdown(final)
+        st.divider()
+        full_text = f"""=== {ticker_input} — {company['name']} ===
+
+[Financial Analysis]
+{fin_result}
+
+[Macro Analysis]
+{mac_result}
+
+[News Analysis]
+{news_result}
+
+[Technical Analysis]
+{tech_result}
+
+[CIO Full Report]
+{final}"""
+        st.download_button(
+            label="Download ผลวิเคราะห์เป็น .txt",
+            data=full_text.encode("utf-8"),
+            file_name=f"{ticker_input}_analysis.txt",
+            mime="text/plain",
+        )
