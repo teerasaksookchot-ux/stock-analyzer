@@ -22,12 +22,13 @@ if "chat_messages" not in st.session_state:
 def parse_analysis_file(text: str) -> dict | None:
     try:
         markers = {
-            "[Financial Analysis]": "fin_result",
-            "[Macro Analysis]":     "mac_result",
-            "[News Analysis]":      "news_result",
-            "[Technical Analysis]": "tech_result",
-            "[CIO Full Report]":    "final",
-            "[Chat History]":       "chat_raw",
+            "[Financial Analysis]":    "fin_result",
+            "[Macro Analysis]":        "mac_result",
+            "[Geopolitical Analysis]": "geo_result",
+            "[News Analysis]":         "news_result",
+            "[Technical Analysis]":    "tech_result",
+            "[CIO Full Report]":       "final",
+            "[Chat History]":          "chat_raw",
         }
         sections = {v: "" for v in markers.values()}
         first_line = text.strip().split("\n")[0]
@@ -74,6 +75,7 @@ def parse_analysis_file(text: str) -> dict | None:
             "company":      company,
             "fin_result":   sections["fin_result"],
             "mac_result":   sections["mac_result"],
+            "geo_result":   sections["geo_result"],
             "news_result":  sections["news_result"],
             "tech_result":  sections["tech_result"],
             "final":        sections["final"],
@@ -185,7 +187,7 @@ def get_news(ticker):
         news = yf.Ticker(ticker).news
         if not news:
             return "ไม่มีข่าว"
-        return "\n".join([f"- {n.get('content', {}).get('title', 'N/A')}" for n in news[:5]])
+        return "\n".join([f"- {n.get('content', {}).get('title', 'N/A')}" for n in news[:10]])
     except:
         return "ไม่มีข่าว"
 
@@ -198,6 +200,162 @@ def get_macro_data():
         return f"Fed Rate: {fr}% (ณ {fd}) | CPI: {cv} (ณ {cd})"
     except:
         return "ไม่สามารถดึงข้อมูล macro ได้"
+
+
+def get_technical_indicators(hist):
+    """คำนวณ technical indicators ครบชุด"""
+    try:
+        c = hist["Close"]
+        h = hist["High"]
+        l = hist["Low"]
+
+        # RSI
+        d   = c.diff()
+        rsi = 100 - (100 / (1 + d.clip(lower=0).rolling(14).mean() / (-d.clip(upper=0)).rolling(14).mean()))
+
+        # MACD
+        ema12    = c.ewm(span=12, adjust=False).mean()
+        ema26    = c.ewm(span=26, adjust=False).mean()
+        macd     = ema12 - ema26
+        signal   = macd.ewm(span=9, adjust=False).mean()
+        hist_val = macd - signal
+
+        # ATR
+        tr  = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean()
+
+        # Stochastic %K %D
+        low14  = l.rolling(14).min()
+        high14 = h.rolling(14).max()
+        stoch_k = ((c - low14) / (high14 - low14) * 100)
+        stoch_d = stoch_k.rolling(3).mean()
+
+        # Bollinger Band Width
+        ma20  = c.rolling(20).mean()
+        std20 = c.rolling(20).std()
+        bb_width = ((ma20 + 2*std20) - (ma20 - 2*std20)) / ma20 * 100
+
+        latest = {
+            "RSI":        round(rsi.iloc[-1], 1),
+            "MACD":       round(macd.iloc[-1], 3),
+            "MACD_Signal":round(signal.iloc[-1], 3),
+            "MACD_Hist":  round(hist_val.iloc[-1], 3),
+            "ATR":        round(atr.iloc[-1], 2),
+            "Stoch_K":    round(stoch_k.iloc[-1], 1),
+            "Stoch_D":    round(stoch_d.iloc[-1], 1),
+            "BB_Width":   round(bb_width.iloc[-1], 1),
+        }
+
+        summary = (
+            f"RSI(14)={latest['RSI']} | "
+            f"MACD={latest['MACD']} Signal={latest['MACD_Signal']} Hist={latest['MACD_Hist']} | "
+            f"ATR(14)=${latest['ATR']} | "
+            f"Stoch %K={latest['Stoch_K']} %D={latest['Stoch_D']} | "
+            f"BB Width={latest['BB_Width']}%"
+        )
+        return summary
+    except Exception as e:
+        return f"คำนวณ indicators ไม่ได้: {e}"
+
+def get_quarterly_financials(ticker):
+    """ดึงงบการเงินรายไตรมาส"""
+    try:
+        stock = yf.Ticker(ticker)
+        def df_to_str(df, name):
+            if df is None or df.empty:
+                return f"{name}: ไม่มีข้อมูล"
+            return f"{name}:\n{df.to_string()}"
+        return {
+            "quarterly_income": df_to_str(stock.quarterly_financials,    "Quarterly Income Statement"),
+            "quarterly_balance": df_to_str(stock.quarterly_balance_sheet, "Quarterly Balance Sheet"),
+            "quarterly_cashflow": df_to_str(stock.quarterly_cashflow,     "Quarterly Cash Flow"),
+        }
+    except:
+        return {"quarterly_income": "N/A", "quarterly_balance": "N/A", "quarterly_cashflow": "N/A"}
+
+def get_analyst_ratings(ticker):
+    """ดึงคำแนะนำจากนักวิเคราะห์"""
+    try:
+        stock = yf.Ticker(ticker)
+        info  = stock.info
+        recs  = stock.recommendations
+        target_price = info.get("targetMeanPrice")
+        target_high  = info.get("targetHighPrice")
+        target_low   = info.get("targetLowPrice")
+        num_analysts = info.get("numberOfAnalystOpinions", 0)
+        rec_key      = info.get("recommendationKey", "N/A")
+        rec_mean     = info.get("recommendationMean")
+
+        summary = f"Consensus: {rec_key.upper()} (mean={rec_mean}) | จาก {num_analysts} นักวิเคราะห์"
+        if target_price:
+            summary += f" | Target Price: ${target_price:.2f} (Low=${target_low:.2f} High=${target_high:.2f})"
+
+        if recs is not None and not recs.empty:
+            latest_recs = recs.tail(5).to_string()
+            summary += f"\n\nคำแนะนำล่าสุด:\n{latest_recs}"
+        return summary
+    except:
+        return "ไม่มีข้อมูลนักวิเคราะห์"
+
+def get_earnings_date(ticker):
+    """ดึงวันประกาศผลประกอบการถัดไป"""
+    try:
+        stock    = yf.Ticker(ticker)
+        calendar = stock.calendar
+        if calendar is None or calendar.empty:
+            return "ไม่มีข้อมูลวันประกาศผล"
+        earnings_dates = []
+        if "Earnings Date" in calendar.index:
+            dates = calendar.loc["Earnings Date"]
+            if hasattr(dates, '__iter__'):
+                earnings_dates = [str(d)[:10] for d in dates]
+            else:
+                earnings_dates = [str(dates)[:10]]
+        eps_est = calendar.loc["EPS Estimate"].values[0] if "EPS Estimate" in calendar.index else "N/A"
+        rev_est = calendar.loc["Revenue Estimate"].values[0] if "Revenue Estimate" in calendar.index else "N/A"
+        date_str = " ถึง ".join(earnings_dates) if earnings_dates else "N/A"
+        return f"Earnings Date: {date_str} | EPS Estimate: {eps_est} | Revenue Estimate: {rev_est}"
+    except:
+        return "ไม่มีข้อมูลวันประกาศผล"
+
+def get_yield_curve():
+    """ดึง 2Y/10Y Treasury yield spread จาก FRED"""
+    try:
+        y2  = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS2",  timeout=5).text.strip().split("\n")[-1]
+        y10 = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10", timeout=5).text.strip().split("\n")[-1]
+        _, r2  = y2.split(",")
+        _, r10 = y10.split(",")
+        spread = round(float(r10) - float(r2), 2)
+        status = "Inverted (เสี่ยง recession)" if spread < 0 else "Normal"
+        return f"2Y Yield: {r2}% | 10Y Yield: {r10}% | Spread: {spread}% ({status})"
+    except:
+        return "ไม่สามารถดึงข้อมูล Yield Curve"
+
+
+@st.cache_data(ttl=1800)
+def get_geopolitical_indicators():
+    """ดึงตัวชี้วัดความเสี่ยงภูมิรัฐศาสตร์จากตลาด"""
+    indicators = {
+        "VIX (ความกลัวตลาด)":   "^VIX",
+        "Gold (safe haven $)":   "GC=F",
+        "Oil WTI ($/barrel)":    "CL=F",
+        "USD Index":             "DX-Y.NYB",
+        "Defense ETF (ITA)":     "ITA",
+    }
+    results = {}
+    for name, sym in indicators.items():
+        try:
+            hist = yf.Ticker(sym).history(period="5d")
+            if hist.empty:
+                continue
+            cur    = hist["Close"].iloc[-1]
+            prev   = hist["Close"].iloc[0]
+            chg    = round((cur - prev) / prev * 100, 1)
+            sign   = "+" if chg >= 0 else ""
+            results[name] = f"{cur:.2f} ({sign}{chg}% 5d)"
+        except:
+            pass
+    return results
 
 
 @st.cache_data(ttl=3600)
@@ -440,19 +598,40 @@ def run_agent(prompt, max_tokens=1000):
         messages=[{"role": "user", "content": prompt}]
     ).content[0].text
 
-def financial_agent(company, financials):
+def financial_agent(company, financials, quarterly, analyst):
     return run_agent(f"""คุณเป็น Financial Analyst วิเคราะห์งบการเงินของ {company['ticker']}
+
+=== งบการเงินรายปี ===
 {financials['income_stmt']}
 {financials['balance_sheet']}
 {financials['cash_flow']}
-วิเคราะห์: 1.แนวโน้มรายได้และกำไร 2.ความแข็งแกร่งงบดุล 3.คุณภาพกระแสเงินสด 4.จุดแข็ง/อ่อน
-ตอบเป็นภาษาไทย กระชับ อ้างอิงตัวเลขจริง""", 1000)
 
-def macro_agent(company, macro):
+=== งบการเงินรายไตรมาส ===
+{quarterly['quarterly_income']}
+{quarterly['quarterly_cashflow']}
+
+=== คำแนะนำนักวิเคราะห์ ===
+{analyst}
+
+วิเคราะห์:
+1. แนวโน้มรายได้และกำไร (รายปีและรายไตรมาส momentum เร่งหรือชะลอ)
+2. ความแข็งแกร่งของงบดุล
+3. คุณภาพกระแสเงินสด
+4. จุดแข็ง/อ่อนจากงบ
+5. consensus นักวิเคราะห์สอดคล้องกับงบมั้ย
+ตอบเป็นภาษาไทย กระชับ อ้างอิงตัวเลขจริง""", 1200)
+
+def macro_agent(company, macro, yield_curve):
     return run_agent(f"""คุณเป็น Macro Economist วิเคราะห์ผลกระทบ macro ต่อ {company['ticker']}
-Macro: {macro} | Sector: {company['sector']} | ธุรกิจ: {company['summary']}
-วิเคราะห์: 1.ผลกระทบดอกเบี้ย/เงินเฟ้อ 2.macro เอื้อหรืออุปสรรค 3.ความเสี่ยง macro
-ตอบเป็นภาษาไทย กระชับ""", 600)
+Macro: {macro}
+Yield Curve: {yield_curve}
+Sector: {company['sector']} | ธุรกิจ: {company['summary']}
+วิเคราะห์:
+1. ผลกระทบดอกเบี้ยและเงินเฟ้อต่อธุรกิจนี้
+2. Yield Curve บ่งบอกอะไรและกระทบอย่างไร
+3. macro เอื้อหรืออุปสรรคโดยรวม
+4. ความเสี่ยง macro หลักที่ต้องระวัง
+ตอบเป็นภาษาไทย กระชับ""", 700)
 
 def news_agent(company, news):
     return run_agent(f"""คุณเป็น News Analyst วิเคราะห์ข่าว {company['ticker']}
@@ -460,20 +639,41 @@ def news_agent(company, news):
 วิเคราะห์: 1.sentiment รวม 2.ประเด็นกระทบราคา 3.ความเสี่ยงที่ต้องจับตา
 ตอบเป็นภาษาไทย กระชับ""", 600)
 
-def technical_agent(company, price_summary):
+def technical_agent(company, price_summary, indicators):
     return run_agent(f"""คุณเป็น Technical Analyst วิเคราะห์ราคา {company['ticker']}
-{price_summary}
-วิเคราะห์: 1.ราคาอยู่โซนไหน 2.แนวโน้ม MA20 vs MA50 3.แนวรับ/แนวต้าน
-ตอบเป็นภาษาไทย กระชับ""", 600)
 
-def orchestrator_agent(company, fin, mac, news, tech):
-    return run_agent(f"""คุณเป็น CIO สรุปผลจากทีม
+ราคาและ Moving Averages:
+{price_summary}
+
+Technical Indicators:
+{indicators}
+
+วิเคราะห์:
+1. ราคาอยู่โซนไหน (ใกล้ High/Low/กลาง)
+2. แนวโน้ม MA20 vs MA50 (uptrend/downtrend/sideways)
+3. RSI: overbought/oversold/neutral
+4. MACD: bullish/bearish crossover
+5. Stochastic: สัญญาณเข้า/ออก
+6. ATR: ความผันผวนสูง/ต่ำ ควรตั้ง stop ห่างแค่ไหน
+7. แนวรับ/แนวต้านหลัก
+ตอบเป็นภาษาไทย กระชับ มีตัวเลขอ้างอิง""", 800)
+
+def orchestrator_agent(company, fin, mac, geo, news, tech):
+    return run_agent(f"""คุณเป็น CIO สรุปผลจากทีมผู้เชี่ยวชาญ
 หุ้น: {company['ticker']} ราคา: ${company['price']:.2f} Market Cap: ${company['market_cap_b']:.1f}B
-[Financial]: {fin}
-[Macro]: {mac}
-[News]: {news}
-[Technical]: {tech}
-สรุป: 1.น่าลงทุนมั้ย 2.จุดเข้าซื้อ 3.Stop Loss 4.ระดับความเสี่ยง 5.กลยุทธ์
+
+[Financial Analysis]: {fin}
+[Macro Analysis]: {mac}
+[Geopolitical Risk]: {geo}
+[News Analysis]: {news}
+[Technical Analysis]: {tech}
+
+สรุปรวมให้ครบ:
+1. ภาพรวม — น่าลงทุนมั้ย และทำไม (รวมมิติ geopolitical)
+2. จุดเข้าซื้อที่แนะนำ (ราคาหรือสัญญาณ)
+3. Stop Loss และเหตุผล
+4. ระดับความเสี่ยงรวม (Financial + Macro + Geopolitical + Technical)
+5. กลยุทธ์ที่เหมาะสม (DCA / รอ pullback / เข้าทันที / หลีกเลี่ยง)
 ตอบเป็นภาษาไทย ละเอียด มีตัวเลขชัดเจน""", 3000)
 
 
@@ -505,12 +705,40 @@ def competitor_agent(company, competitors):
 
 ตอบเป็นภาษาไทย กระชับ มีตัวเลขอ้างอิง""", 1000)
 
-def chat_agent(ticker, company, fin_result, mac_result, news_result, tech_result, final, messages):
+
+def geopolitical_agent(company, geo_indicators, news):
+    """วิเคราะห์ความเสี่ยงภูมิรัฐศาสตร์และสงคราม"""
+    geo_str = "\n".join([f"- {k}: {v}" for k, v in geo_indicators.items()]) if geo_indicators else "ไม่มีข้อมูล"
+    return run_agent(f"""คุณเป็น Geopolitical Risk Analyst
+วิเคราะห์ความเสี่ยงด้านภูมิรัฐศาสตร์ สงคราม และนโยบายรัฐที่กระทบ {company['ticker']} ({company['name']})
+
+=== ข้อมูลบริษัท ===
+Sector: {company['sector']} | Industry: {company['industry']}
+ธุรกิจ: {company['summary']}
+
+=== ตัวชี้วัดความเสี่ยงตลาด (real-time) ===
+{geo_str}
+
+=== ข่าวล่าสุด ===
+{news}
+
+วิเคราะห์ให้ครบ 5 ด้าน:
+1. ความเสี่ยงหลักจากสงคราม/ความขัดแย้ง (เช่น Russia-Ukraine, Israel-Gaza, US-China tension) ที่กระทบ sector นี้โดยตรง
+2. VIX และ safe haven (Gold/USD) บ่งชี้ sentiment ตลาดอย่างไร
+3. ความเสี่ยง Supply Chain จากความขัดแย้งโลก (วัตถุดิบ, การผลิต, logistics)
+4. นโยบายรัฐบาล/การค้า (tariff, sanctions, subsidy, IRA) ที่กระทบธุรกิจนี้
+5. สรุประดับความเสี่ยงภูมิรัฐศาสตร์ (สูง/กลาง/ต่ำ) พร้อมผลกระทบต่อราคาหุ้นและกลยุทธ์รับมือ
+
+ตอบเป็นภาษาไทย ละเอียด มีเหตุผลชัดเจน""", 1000)
+
+
+def chat_agent(ticker, company, fin_result, mac_result, geo_result, news_result, tech_result, final, messages, earnings_date="N/A"):
     """Chat Agent ที่รู้จักผลวิเคราะห์ทั้งหมดและราคา real-time"""
     realtime_price = get_realtime_price(ticker)
 
     system_context = f"""คุณเป็น Investment Advisor ผู้เชี่ยวชาญที่วิเคราะห์หุ้น {ticker} ({company['name']}) มาแล้ว
 ราคาปัจจุบัน (real-time): ${realtime_price:.2f}
+วันประกาศผลประกอบการถัดไป: {earnings_date}
 
 === ผลวิเคราะห์จากทีม ===
 
@@ -525,6 +753,9 @@ def chat_agent(ticker, company, fin_result, mac_result, news_result, tech_result
 
 [Technical Analysis]
 {tech_result}
+
+[Geopolitical Risk]
+{geo_result}
 
 [CIO Summary]
 {final}
@@ -565,9 +796,11 @@ if st.button("Analyze", type="primary") and ticker_input:
         company     = cached["company"]
         fin_result  = cached["fin_result"]
         mac_result  = cached["mac_result"]
+        geo_result  = cached.get("geo_result", "ไม่มีข้อมูล geopolitical")
         news_result = cached["news_result"]
         tech_result = cached["tech_result"]
         final       = cached["final"]
+        earnings_date = "N/A"
         hist, fin, bs, cf = get_chart_data(ticker_input)
 
     else:
@@ -577,26 +810,35 @@ if st.button("Analyze", type="primary") and ticker_input:
                 st.error(f"ไม่พบข้อมูล {ticker_input}")
                 st.stop()
             financials        = get_financials(ticker_input)
+            quarterly         = get_quarterly_financials(ticker_input)
+            analyst           = get_analyst_ratings(ticker_input)
+            earnings_date     = get_earnings_date(ticker_input)
             hist, fin, bs, cf = get_chart_data(ticker_input)
             price_summary     = get_price_summary(hist)
+            indicators        = get_technical_indicators(hist)
             news              = get_news(ticker_input)
             macro             = get_macro_data()
+            yield_curve       = get_yield_curve()
+            geo_indicators    = get_geopolitical_indicators()
 
-        with st.spinner("Financial Agent..."):
-            fin_result  = financial_agent(company, financials)
-        with st.spinner("Macro Agent..."):
-            mac_result  = macro_agent(company, macro)
-        with st.spinner("News Agent..."):
+        with st.spinner("Financial Agent (+ Quarterly + Analyst)..."):
+            fin_result  = financial_agent(company, financials, quarterly, analyst)
+        with st.spinner("Macro Agent (+ Yield Curve)..."):
+            mac_result  = macro_agent(company, macro, yield_curve)
+        with st.spinner("News Agent (10 headlines)..."):
             news_result = news_agent(company, news)
-        with st.spinner("Technical Agent..."):
-            tech_result = technical_agent(company, price_summary)
-        with st.spinner("Orchestrator สรุปภาพรวม..."):
-            final       = orchestrator_agent(company, fin_result, mac_result, news_result, tech_result)
+        with st.spinner("Technical Agent (+ RSI/MACD/ATR/Stochastic)..."):
+            tech_result = technical_agent(company, price_summary, indicators)
+        with st.spinner("Geopolitical Agent (+ War/Policy/Supply Chain)..."):
+            geo_result  = geopolitical_agent(company, geo_indicators, news)
+        with st.spinner("Orchestrator สรุปภาพรวม (ทุก Agent)..."):
+            final       = orchestrator_agent(company, fin_result, mac_result, geo_result, news_result, tech_result)
 
         st.session_state["history"][ticker_input] = {
             "company":    company,
             "fin_result":  fin_result,
             "mac_result":  mac_result,
+            "geo_result":  geo_result,
             "news_result": news_result,
             "tech_result": tech_result,
             "final":       final,
@@ -607,8 +849,8 @@ if st.button("Analyze", type="primary") and ticker_input:
         st.session_state["chat_messages"][ticker_input] = []
 
     # ===== TABS =====
-    tab_dash, tab_fin, tab_mac, tab_news, tab_tech, tab_full, tab_comp, tab_chat = st.tabs([
-        "Dashboard", "Financial", "Macro", "News", "Technical", "CIO Full Report", "Competitors", "Chat"
+    tab_dash, tab_fin, tab_mac, tab_geo, tab_news, tab_tech, tab_full, tab_comp, tab_chat = st.tabs([
+        "Dashboard", "Financial", "Macro", "Geopolitical", "News", "Technical", "CIO Full Report", "Competitors", "Chat"
     ])
 
     # ===== DASHBOARD TAB =====
@@ -666,6 +908,11 @@ if st.button("Analyze", type="primary") and ticker_input:
                 st.markdown(mac_result)
 
         with a2:
+            st.markdown("**Geopolitical Agent**")
+            st.markdown(geo_result[:300] + "...")
+            with st.expander("ดูรายละเอียด Geopolitical"):
+                st.markdown(geo_result)
+
             st.markdown("**News Agent**")
             st.markdown(news_result[:300] + "...")
             with st.expander("ดูรายละเอียด News"):
@@ -684,6 +931,11 @@ if st.button("Analyze", type="primary") and ticker_input:
     with tab_mac:
         st.subheader(f"Macro Analysis — {ticker_input}")
         st.markdown(mac_result)
+
+    with tab_geo:
+        st.subheader(f"Geopolitical Risk — {ticker_input}")
+        st.caption("วิเคราะห์ความเสี่ยงสงคราม นโยบายรัฐ และภูมิรัฐศาสตร์โลก")
+        st.markdown(geo_result)
 
     with tab_news:
         st.subheader(f"News & Sentiment — {ticker_input}")
@@ -715,6 +967,9 @@ if st.button("Analyze", type="primary") and ticker_input:
 
 [Macro Analysis]
 {mac_result}
+
+[Geopolitical Analysis]
+{geo_result}
 
 [News Analysis]
 {news_result}
@@ -816,8 +1071,9 @@ if st.button("Analyze", type="primary") and ticker_input:
                 with st.spinner("กำลังคิด..."):
                     reply = chat_agent(
                         ticker_input, company,
-                        fin_result, mac_result, news_result, tech_result, final,
-                        st.session_state["chat_messages"][ticker_input][:-1]
+                        fin_result, mac_result, geo_result, news_result, tech_result, final,
+                        st.session_state["chat_messages"][ticker_input][:-1],
+                        earnings_date
                     )
                 st.markdown(reply)
 
