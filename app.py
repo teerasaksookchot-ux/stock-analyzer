@@ -350,7 +350,7 @@ def portfolio_add_position(ticker, company_name, shares, entry_price, entry_date
     if not db:
         return False
     try:
-        db.table("portfolio").insert({
+        db.table("portfolios").insert({
             "ticker":       ticker.upper(),
             "company_name": company_name,
             "shares":       shares,
@@ -368,7 +368,7 @@ def portfolio_delete_position(position_id):
     if not db:
         return
     try:
-        db.table("portfolio").delete().eq("id", position_id).execute()
+        db.table("portfolios").delete().eq("id", position_id).execute()
     except:
         pass
 
@@ -377,7 +377,7 @@ def portfolio_load_positions() -> list:
     if not db:
         return []
     try:
-        r = db.table("portfolio").select("*").order("created_at", desc=False).execute()
+        r = db.table("portfolios").select("*").order("created_at", desc=False).execute()
         return r.data or []
     except:
         return []
