@@ -1606,7 +1606,96 @@ if "load_ticker" in st.session_state:
 else:
     ticker_input = st.text_input("ใส่ ticker", placeholder="เช่น BE, NVDA, TSLA").upper().strip()
 
-if st.button("Analyze", type="primary") and ticker_input:
+col_q, col_a = st.columns([1, 1])
+btn_quick    = col_q.button("⚡ Quick View (ฟรี)", use_container_width=True)
+btn_analyze  = col_a.button("🤖 Full Analyze (~$0.09)", type="primary", use_container_width=True)
+
+# ===== QUICK VIEW MODE =====
+if btn_quick and ticker_input:
+    with st.spinner("กำลังดึงข้อมูล..."):
+        company = get_company_info(ticker_input)
+        if not company:
+            st.error(f"ไม่พบข้อมูล {ticker_input}")
+            st.stop()
+        hist, fin, bs, cf = get_chart_data(ticker_input)
+        price_summary     = get_price_summary(hist)
+        indicators_raw    = get_technical_indicators(hist)
+        options_data      = get_options_data(ticker_input)
+        valuation_ctx     = get_valuation_context(ticker_input)
+        relative_str      = get_relative_strength(ticker_input, company.get("sector","Technology"))
+        mgmt_cred         = get_management_credibility(ticker_input)
+        dcf_val           = calc_simple_dcf(ticker_input)
+        macro             = get_macro_data()
+        geo_ind           = get_geopolitical_indicators()
+        insider_short     = get_insider_short_data(ticker_input)
+
+    # Metric cards
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("ราคา",       f"${company['price']:.2f}")
+    c2.metric("Market Cap", f"${company['market_cap_b']:.1f}B")
+    c3.metric("Sector",     company['sector'])
+    c4.metric("Industry",   company['industry'])
+
+    st.divider()
+
+    # Charts
+    st.subheader("กราฟ")
+    ALL_CHARTS_QV = ["ราคา + MA","Bollinger Bands","Trendline",
+                     "Volume","RSI","Revenue","Gross Margin","Free Cash Flow","Debt vs Cash"]
+    sel_qv = st.multiselect("เลือกกราฟ (สูงสุด 2)", ALL_CHARTS_QV,
+                             default=["ราคา + MA","Revenue"], max_selections=2, key="qv_charts")
+    if len(sel_qv) == 2:
+        gc1, gc2 = st.columns(2)
+        with gc1: draw_chart(sel_qv[0], ticker_input, hist, fin, bs, cf)
+        with gc2: draw_chart(sel_qv[1], ticker_input, hist, fin, bs, cf)
+    elif len(sel_qv) == 1:
+        draw_chart(sel_qv[0], ticker_input, hist, fin, bs, cf)
+
+    st.divider()
+
+    # Quick data grid
+    st.subheader("ข้อมูลสำคัญ (ไม่ต้องใช้ AI)")
+
+    qv1, qv2 = st.columns(2)
+    with qv1:
+        with st.expander("Valuation & DCF", expanded=True):
+            st.text(valuation_ctx)
+            st.text(dcf_val)
+        with st.expander("Technical Snapshot", expanded=True):
+            st.text(price_summary)
+            if indicators_raw:
+                ind = indicators_raw
+                st.text(
+                    f"RSI: {ind.get('rsi',0):.1f} | MACD: {ind.get('macd',0):.2f} | "
+                    f"Signal: {ind.get('macd_signal',0):.2f}\n"
+                    f"ATR: ${ind.get('atr',0):.2f} | BB: {ind.get('bb_position','')}"
+                )
+        with st.expander("Management Credibility", expanded=True):
+            st.text(mgmt_cred)
+
+    with qv2:
+        with st.expander("Options Data", expanded=True):
+            if options_data:
+                st.text(options_data["summary"])
+            else:
+                st.text("ไม่มีข้อมูล options")
+        with st.expander("Macro & Geopolitical", expanded=True):
+            st.text(macro)
+            geo_str = "\n".join([f"{k}: {v}" for k,v in geo_ind.items()]) if geo_ind else "N/A"
+            st.text(geo_str)
+        with st.expander("Relative Performance", expanded=True):
+            st.text(relative_str)
+        if insider_short:
+            with st.expander("Short Interest", expanded=True):
+                st.text(
+                    f"Short % of Float: {insider_short.get('short_pct_float',0)}% | "
+                    f"Days to Cover: {insider_short.get('short_ratio',0)}"
+                )
+
+    st.divider()
+    st.info("กด **🤖 Full Analyze** เพื่อให้ AI วิเคราะห์เชิงลึกพร้อมจุดเข้า/ออก (~$0.09)")
+
+if btn_analyze and ticker_input:
 
     if ticker_input in st.session_state["history"]:
         st.info(f"โหลดผลเก่าของ {ticker_input} (ไม่เสีย token)")
