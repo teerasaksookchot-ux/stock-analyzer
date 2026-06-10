@@ -897,6 +897,178 @@ def get_options_data(ticker: str) -> dict | None:
         return None
 
 
+# ===== VALUATION CONTEXT =====
+@st.cache_data(ttl=86400)
+def get_valuation_context(ticker: str) -> str:
+    try:
+        stock = yf.Ticker(ticker)
+        info  = stock.info
+        pe    = info.get("trailingPE", 0) or 0
+        fwd_pe = info.get("forwardPE", 0) or 0
+        pb    = info.get("priceToBook", 0) or 0
+        ps    = info.get("priceToSalesTrailing12Months", 0) or 0
+        peg   = info.get("pegRatio", 0) or 0
+        high_52w  = info.get("fiftyTwoWeekHigh", 0) or 0
+        low_52w   = info.get("fiftyTwoWeekLow", 0) or 0
+        cur_price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+        pct_h = round((cur_price - high_52w) / high_52w * 100, 1) if high_52w else 0
+        pct_l = round((cur_price - low_52w)  / low_52w  * 100, 1) if low_52w  else 0
+        beta  = info.get("beta", 0) or 0
+        lines = [
+            f"P/E: {pe:.1f}x | Forward P/E: {fwd_pe:.1f}x | P/B: {pb:.1f}x",
+            f"P/S: {ps:.1f}x | PEG: {peg:.1f}x | Beta: {beta:.2f}",
+            f"52W High: ${high_52w:.2f} ({pct_h:+.1f}%) | 52W Low: ${low_52w:.2f} ({pct_l:+.1f}%)",
+        ]
+        return "\n".join(lines)
+    except:
+        return "Valuation Context: ดึงไม่ได้"
+
+# ===== RELATIVE STRENGTH =====
+@st.cache_data(ttl=3600)
+def get_relative_strength(ticker: str, sector: str) -> str:
+    sector_etf = {
+        "Technology": "XLK", "Information Technology": "XLK",
+        "Healthcare": "XLV", "Financials": "XLF",
+        "Energy": "XLE", "Consumer Discretionary": "XLY",
+        "Consumer Staples": "XLP", "Industrials": "XLI",
+        "Materials": "XLB", "Utilities": "XLU",
+        "Real Estate": "XLRE", "Communication Services": "XLC",
+    }
+    etf = sector_etf.get(sector, "SPY")
+    results = {}
+    for sym, label in [(ticker, "หุ้นนี้"), ("SPY", "S&P 500"), (etf, f"Sector ETF({etf})")]:
+        try:
+            h = yf.Ticker(sym).history(period="6mo")
+            if h.empty:
+                continue
+            results[label] = {
+                "1M": round((h["Close"].iloc[-1]/h["Close"].iloc[-22]-1)*100, 1) if len(h)>=22 else 0,
+                "3M": round((h["Close"].iloc[-1]/h["Close"].iloc[-66]-1)*100, 1) if len(h)>=66 else 0,
+                "6M": round((h["Close"].iloc[-1]/h["Close"].iloc[0]-1)*100, 1),
+            }
+        except:
+            pass
+    if not results:
+        return "Relative Strength: ดึงไม่ได้"
+    lines = ["Relative Performance:"]
+    for label, r in results.items():
+        lines.append(f"  {label:20} 1M:{r['1M']:+6.1f}% 3M:{r['3M']:+6.1f}% 6M:{r['6M']:+6.1f}%")
+    if "หุ้นนี้" in results and "S&P 500" in results:
+        diff = results["หุ้นนี้"]["3M"] - results["S&P 500"]["3M"]
+        lines.append(f"vs S&P500(3M): {'Outperform ✅' if diff>0 else 'Underperform ⚠️'} {diff:+.1f}%")
+    return "\n".join(lines)
+
+# ===== MANAGEMENT CREDIBILITY =====
+@st.cache_data(ttl=86400)
+def get_management_credibility(ticker: str) -> str:
+    try:
+        earnings = yf.Ticker(ticker).earnings_history
+        if earnings is None or earnings.empty:
+            return "Management: ไม่มีข้อมูล"
+        beat = miss = 0
+        total_surp = 0
+        records = []
+        for _, row in earnings.tail(8).iterrows():
+            actual   = row.get("epsActual")
+            estimate = row.get("epsEstimate")
+            if actual is None or estimate is None or estimate == 0:
+                continue
+            surp = round((actual - estimate)/abs(estimate)*100, 1)
+            total_surp += surp
+            beat += 1 if surp > 0 else 0
+            miss += 1 if surp <= 0 else 0
+            records.append(f"  {str(row.name)[:10]}: EPS {actual:.2f} vs คาด {estimate:.2f} ({surp:+.1f}%)")
+        total = beat + miss
+        if total == 0:
+            return "Management: ข้อมูลไม่เพียงพอ"
+        beat_rate = round(beat/total*100)
+        avg_surp  = round(total_surp/total, 1)
+        cred = ("สูง ✅ Beat สม่ำเสมอ" if beat_rate>=75 else
+                "กลาง ⚠️ Beat บ้าง Miss บ้าง" if beat_rate>=50 else
+                "ต่ำ ❌ Miss บ่อย")
+        return (f"Management Credibility: {cred}\n"
+                f"Beat Rate: {beat_rate}% ({beat}/{total}) | Avg Surprise: {avg_surp:+.1f}%\n"
+                + "\n".join(records))
+    except:
+        return "Management Credibility: ดึงไม่ได้"
+
+# ===== DCF VALUATION =====
+@st.cache_data(ttl=86400)
+def calc_simple_dcf(ticker: str) -> str:
+    try:
+        stock = yf.Ticker(ticker)
+        info  = stock.info
+        cf    = stock.cashflow
+        if cf is None or cf.empty or "Free Cash Flow" not in cf.index:
+            return "DCF: ไม่มีข้อมูล FCF"
+        fcf_vals = cf.loc["Free Cash Flow"].dropna()
+        if len(fcf_vals) < 2 or fcf_vals.iloc[0] <= 0:
+            return f"DCF: FCF ติดลบหรือไม่มีข้อมูล ไม่สามารถคำนวณได้"
+        growth = max(min((fcf_vals.iloc[0]/fcf_vals.iloc[-1])**(1/(len(fcf_vals)-1))-1, 0.25), -0.10)
+        wacc = 0.10; terminal_g = 0.03
+        shares = info.get("sharesOutstanding", 1) or 1
+        pv = 0; fcf = fcf_vals.iloc[0]
+        for y in range(1, 11):
+            fcf *= (1+growth); pv += fcf/(1+wacc)**y
+        terminal = fcf*(1+terminal_g)/(wacc-terminal_g)
+        pv += terminal/(1+wacc)**10
+        intrinsic = round(pv/shares, 2)
+        cur = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+        margin = round((intrinsic-cur)/cur*100, 1) if cur else 0
+        verdict = ("Undervalued น่าสนใจ ✅" if margin>20 else
+                   "Fair Value 🟡" if margin>-10 else
+                   "Overvalued ระวัง ❌")
+        return (f"DCF Intrinsic Value: ${intrinsic:.2f} | ราคาปัจจุบัน: ${cur:.2f}\n"
+                f"Margin of Safety: {margin:+.1f}% → {verdict}\n"
+                f"(FCF Growth: {growth*100:.1f}% | WACC: 10% | Terminal: 3%)")
+    except Exception as e:
+        return f"DCF: คำนวณไม่ได้ ({e})"
+
+# ===== EARNINGS TRANSCRIPT (SEC 8-K) =====
+@st.cache_data(ttl=86400)
+def get_earnings_transcript(ticker: str) -> str:
+    try:
+        headers = {"User-Agent": "StockAnalyzer research@example.com"}
+        tickers_json = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=headers, timeout=10
+        ).json()
+        cik = None
+        for _, val in tickers_json.items():
+            if val.get("ticker","").upper() == ticker.upper():
+                cik = str(val["cik_str"]).zfill(10); break
+        if not cik:
+            return "8-K: ไม่พบ CIK"
+        subs = requests.get(
+            f"https://data.sec.gov/submissions/CIK{cik}.json",
+            headers=headers, timeout=10
+        ).json()
+        recent = subs.get("filings",{}).get("recent",{})
+        forms  = recent.get("form",[])
+        dates  = recent.get("filingDate",[])
+        accnos = recent.get("accessionNumber",[])
+        latest_8k = next(
+            ({"date": dates[i], "accno": accnos[i].replace("-","")}
+             for i, f in enumerate(forms) if f == "8-K"), None
+        )
+        if not latest_8k:
+            return "8-K: ไม่พบ filing"
+        idx = requests.get(
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{latest_8k['accno']}/index.json",
+            headers=headers, timeout=10
+        ).json()
+        for doc in idx.get("directory",{}).get("item",[]):
+            name = doc.get("name","").lower()
+            if any(x in name for x in ["ex99","exhibit99","press","earnings"]):
+                url  = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{latest_8k['accno']}/{doc['name']}"
+                text = requests.get(url, headers=headers, timeout=10).text
+                clean = " ".join(text.split())[:2500]
+                return f"[8-K Earnings Release {latest_8k['date']}]\n{clean}"
+        return f"พบ 8-K ({latest_8k['date']}) แต่ดึงเนื้อหาไม่ได้"
+    except Exception as e:
+        return f"8-K: ดึงไม่ได้ ({e})"
+
+
 # ===== CHART CALCULATIONS =====
 
 def calc_bollinger(hist, window=20, k=2):
@@ -1070,7 +1242,7 @@ def draw_chart(name, ticker, hist, fin, bs, cf, sector='Technology'):
         else:
             st.warning("ไม่พบข้อมูลคู่แข่งใน sector นี้")
 
-# ===== AGENTS =====
+# ===== AGENTS (Chain-of-Thought + Evidence Required) =====
 
 def run_agent(prompt, max_tokens=1000):
     return client.messages.create(
@@ -1079,83 +1251,245 @@ def run_agent(prompt, max_tokens=1000):
         messages=[{"role": "user", "content": prompt}]
     ).content[0].text
 
-def financial_agent(company, financials, quarterly, analyst):
-    return run_agent(f"""คุณเป็น Financial Analyst วิเคราะห์งบการเงินของ {company['ticker']}
+def financial_agent(company, financials, quarterly, analyst,
+                    sec_data="", valuation_ctx="", mgmt_cred="",
+                    dcf_val="", earnings_tx=""):
+    return run_agent(f"""คุณเป็น Senior Financial Analyst ระดับ CFA
+วิเคราะห์ {company['ticker']} ({company['name']}) โดยคิดทีละขั้นตอน
 
 === งบการเงินรายปี ===
 {financials['income_stmt']}
 {financials['balance_sheet']}
 {financials['cash_flow']}
 
-=== งบการเงินรายไตรมาส ===
-{quarterly['quarterly_income']}
-{quarterly['quarterly_cashflow']}
+=== งบรายไตรมาส ===
+{quarterly.get('quarterly_income','')}
 
-=== คำแนะนำนักวิเคราะห์ ===
+=== SEC EDGAR Official ===
+{sec_data}
+
+=== Valuation Context ===
+{valuation_ctx}
+
+=== Management Credibility ===
+{mgmt_cred}
+
+=== DCF Valuation ===
+{dcf_val}
+
+=== Earnings Release (8-K) ===
+{earnings_tx}
+
+=== Analyst Consensus ===
 {analyst}
 
-วิเคราะห์:
-1. แนวโน้มรายได้และกำไร (รายปีและรายไตรมาส momentum เร่งหรือชะลอ)
-2. ความแข็งแกร่งของงบดุล
-3. คุณภาพกระแสเงินสด
-4. จุดแข็ง/อ่อนจากงบ
-5. consensus นักวิเคราะห์สอดคล้องกับงบมั้ย
-ตอบเป็นภาษาไทย กระชับ อ้างอิงตัวเลขจริง""", 1200)
+คิดทีละขั้น:
+
+ขั้น 1 — Revenue Quality
+- Growth YoY แต่ละปี (คำนวณจริง) และ momentum เร่งหรือชะลอ
+- Gross Margin trend เพราะอะไร
+- FCF/Net Income ratio (>80%=ดี, <50%=ระวัง)
+
+ขั้น 2 — งบดุล
+- Net Debt = หนี้รวม - เงินสด (คำนวณจริง)
+- Cash Runway ถ้า FCF ติดลบ
+- Interest Coverage = EBIT ÷ ดอกเบี้ย
+
+ขั้น 3 — Valuation
+- P/E ปัจจุบัน vs Forward P/E vs PEG บ่งชี้อะไร
+- DCF บอกว่าแพงหรือถูก
+
+ขั้น 4 — Management และ Consensus
+- Beat/Miss history บอกอะไรเกี่ยวกับผู้บริหาร
+- Analyst consensus สอดคล้องกับงบมั้ย
+
+สรุป:
+- จุดแข็ง 3 อย่าง (ตัวเลขทุกข้อ)
+- จุดอ่อน 3 อย่าง (ตัวเลขทุกข้อ)
+- Confidence: สูง/กลาง/ต่ำ + เหตุผล
+
+ห้ามสรุปโดยไม่มีตัวเลขอ้างอิง
+ตอบเป็นภาษาไทย""", 1500)
 
 def macro_agent(company, macro, yield_curve):
-    return run_agent(f"""คุณเป็น Macro Economist วิเคราะห์ผลกระทบ macro ต่อ {company['ticker']}
-Macro: {macro}
+    return run_agent(f"""คุณเป็น Chief Macro Economist
+วิเคราะห์ผลกระทบ macro ต่อ {company['ticker']} โดยคิดทีละขั้น
+
+=== Macro Indicators ===
+{macro}
 Yield Curve: {yield_curve}
 Sector: {company['sector']} | ธุรกิจ: {company['summary']}
-วิเคราะห์:
-1. ผลกระทบดอกเบี้ยและเงินเฟ้อต่อธุรกิจนี้
-2. Yield Curve บ่งบอกอะไรและกระทบอย่างไร
-3. macro เอื้อหรืออุปสรรคโดยรวม
-4. ความเสี่ยง macro หลักที่ต้องระวัง
-ตอบเป็นภาษาไทย กระชับ""", 700)
+
+คิดทีละขั้น:
+
+ขั้น 1 — ผลกระทบดอกเบี้ยต่อธุรกิจนี้โดยตรง
+- บริษัทนี้มีหนี้มาก/น้อย WACC เปลี่ยนยังไง
+- ลูกค้าของธุรกิจนี้ได้รับผลกระทบยังไง
+
+ขั้น 2 — ผลกระทบเงินเฟ้อ
+- ต้นทุนหลักคืออะไร เงินเฟ้อกดดันแค่ไหน
+- Pricing power มีหรือไม่
+
+ขั้น 3 — GDP/Unemployment/PMI/Consumer Sentiment บอกอะไร
+- เศรษฐกิจกำลังขยายหรือหดตัว
+- ส่งผลต่อ demand ของธุรกิจนี้อย่างไร
+
+ขั้น 4 — Yield Curve
+- Inverted = ระวัง recession หรือ Normal = ขยายตัว
+- กระทบ sector นี้อย่างไร
+
+สรุป:
+- Macro เอื้อ/เป็นกลาง/เป็นอุปสรรค + เหตุผล
+- ความเสี่ยง macro 2 อย่างที่ใหญ่ที่สุด
+- Confidence: สูง/กลาง/ต่ำ
+
+ตอบเป็นภาษาไทย อ้างตัวเลข macro จริง""", 900)
 
 def news_agent(company, news):
-    return run_agent(f"""คุณเป็น News Analyst วิเคราะห์ข่าว {company['ticker']}
+    return run_agent(f"""คุณเป็น Senior News Analyst และ Behavioral Finance Expert
+วิเคราะห์ข่าว {company['ticker']} ({company['name']})
+
+=== ข่าว ===
 {news}
-วิเคราะห์: 1.sentiment รวม 2.ประเด็นกระทบราคา 3.ความเสี่ยงที่ต้องจับตา
-ตอบเป็นภาษาไทย กระชับ""", 600)
 
-def technical_agent(company, price_summary, indicators):
-    return run_agent(f"""คุณเป็น Technical Analyst วิเคราะห์ราคา {company['ticker']}
+คิดทีละขั้น:
 
-ราคาและ Moving Averages:
+ขั้น 1 — แยกประเภทข่าว
+- ข่าวกระทบ fundamental จริง (earnings, contract, product launch)
+- ข่าวกระทบ sentiment เท่านั้น (opinion, forecast, analyst note)
+- ข่าว noise (ไม่มีนัยสำคัญ)
+
+ขั้น 2 — Sentiment
+- Bullish/Bearish/Neutral + น้ำหนัก (เช่น Bullish 70%)
+- ข่าวไหนมีผลมากที่สุดและทำไม
+
+ขั้น 3 — Catalyst และ Risk
+- Catalyst ที่อาจทำให้ราคาพุ่ง
+- ข่าวเสี่ยงที่อาจกดราคา
+- Event สำคัญที่ต้องจับตา
+
+สรุป + Confidence: สูง/กลาง/ต่ำ
+ตอบเป็นภาษาไทย""", 800)
+
+def technical_agent(company, price_summary, indicators,
+                    options_summary="", relative_strength=""):
+    opts = f"\n=== Options Data ===\n{options_summary}" if options_summary else ""
+    rs   = f"\n=== Relative Strength ===\n{relative_strength}" if relative_strength else ""
+    return run_agent(f"""คุณเป็น Senior Technical Analyst
+วิเคราะห์ {company['ticker']} โดยคิดทีละขั้น
+
+=== Price & Indicators ===
 {price_summary}
-
-Technical Indicators:
 {indicators}
+{opts}
+{rs}
 
-วิเคราะห์:
-1. ราคาอยู่โซนไหน (ใกล้ High/Low/กลาง)
-2. แนวโน้ม MA20 vs MA50 (uptrend/downtrend/sideways)
-3. RSI: overbought/oversold/neutral
-4. MACD: bullish/bearish crossover
-5. Stochastic: สัญญาณเข้า/ออก
-6. ATR: ความผันผวนสูง/ต่ำ ควรตั้ง stop ห่างแค่ไหน
-7. แนวรับ/แนวต้านหลัก
-ตอบเป็นภาษาไทย กระชับ มีตัวเลขอ้างอิง""", 800)
+คิดทีละขั้น:
 
-def orchestrator_agent(company, fin, mac, geo, news, tech):
-    return run_agent(f"""คุณเป็น CIO สรุปผลจากทีมผู้เชี่ยวชาญ
-หุ้น: {company['ticker']} ราคา: ${company['price']:.2f} Market Cap: ${company['market_cap_b']:.1f}B
+ขั้น 1 — โครงสร้างราคา
+- ราคาอยู่ที่ % ไหนของ 52W range
+- เทียบ MA20/MA50 (เหนือ/ต่ำกว่า กี่%)
+- Trend หลัก: Uptrend/Downtrend/Sideways
 
-[Financial Analysis]: {fin}
-[Macro Analysis]: {mac}
-[Geopolitical Risk]: {geo}
-[News Analysis]: {news}
-[Technical Analysis]: {tech}
+ขั้น 2 — Momentum Indicators
+- RSI: Overbought(>70)/Oversold(<30)/Neutral + นัยยะ
+- MACD: Bullish/Bearish + มี divergence มั้ย
+- Stochastic: สัญญาณเข้า/ออก
+- ATR: ควรตั้ง Stop ห่างกี่ % จากราคา
 
-สรุปรวมให้ครบ:
-1. ภาพรวม — น่าลงทุนมั้ย และทำไม (รวมมิติ geopolitical)
-2. จุดเข้าซื้อที่แนะนำ (ราคาหรือสัญญาณ)
-3. Stop Loss และเหตุผล
-4. ระดับความเสี่ยงรวม (Financial + Macro + Geopolitical + Technical)
-5. กลยุทธ์ที่เหมาะสม (DCA / รอ pullback / เข้าทันที / หลีกเลี่ยง)
+ขั้น 3 — Options Sentiment
+- Put/Call Ratio บ่งชี้อะไร
+- Max Pain vs ราคาปัจจุบัน ต่างกันมั้ย
+- IV สูง/ต่ำ บอกอะไรเกี่ยวกับ expected move
+
+ขั้น 4 — Relative Performance
+- Outperform หรือ Underperform vs S&P500 และ Sector
+- บ่งชี้อะไรเกี่ยวกับ momentum
+
+สรุป:
+- แนวรับหลัก 2 ระดับ (ราคาจริง)
+- แนวต้านหลัก 2 ระดับ (ราคาจริง)
+- Scenario ถ้าขึ้น vs ถ้าลง
+- Confidence: สูง/กลาง/ต่ำ
+
+ตอบเป็นภาษาไทย อ้างราคาจริงทุกจุด""", 1000)
+
+def orchestrator_agent(company, fin, mac, geo, insider, news, tech):
+    """CIO Orchestrator แบบ Self-Reflection 2 รอบ"""
+
+    initial_prompt = f"""คุณเป็น Chief Investment Officer
+รวมผลจากทีมผู้เชี่ยวชาญและสรุปภาพรวมการลงทุน
+
+หุ้น: {company['ticker']} ({company['name']})
+ราคา: ${company['price']:.2f} | Market Cap: ${company['market_cap_b']:.1f}B
+
+[Financial Analyst]: {fin}
+[Macro Economist]: {mac}
+[Geopolitical Analyst]: {geo}
+[Insider & Market Structure]: {insider}
+[News Analyst]: {news}
+[Technical Analyst]: {tech}
+
+คิดทีละขั้น:
+
+ขั้น 1 — Bull Case
+- เหตุผล 3 อย่างที่น่าลงทุน (อ้างหลักฐานจาก agent)
+
+ขั้น 2 — Bear Case
+- ความเสี่ยง 3 อย่างที่ต้องระวัง (อ้างหลักฐานจาก agent)
+
+ขั้น 3 — จุดเข้าซื้อ
+- Zone A (Aggressive): ราคา + เหตุผล
+- Zone B (Optimal): ราคา + เหตุผล
+- Zone C (Conservative): ราคา + เหตุผล
+
+ขั้น 4 — Stop Loss และ Target
+- Stop Loss: ราคา + เหตุผลจาก technical
+- Target 1: ราคา + เหตุผล
+- Target 2: ราคา + เหตุผล
+
+ขั้น 5 — สรุป
+- ระดับความเสี่ยงรวม: สูง/กลาง/ต่ำ + เหตุผล
+- กลยุทธ์ที่แนะนำ: DCA/รอ pullback/เข้าทันที/หลีกเลี่ยง
+- Confidence โดยรวม: สูง/กลาง/ต่ำ
+
+ตอบเป็นภาษาไทย ละเอียด มีตัวเลขชัดเจนทุกจุด"""
+
+    initial = run_agent(initial_prompt, max_tokens=3000)
+
+    # Self-Reflection
+    reflection = run_agent(f"""ตรวจสอบการวิเคราะห์นี้อย่างวิจารณ์:
+
+{initial}
+
+ตรวจหา 4 อย่าง:
+1. ข้อสรุปที่ขัดแย้งกันระหว่าง agents (เช่น Financial ดีแต่สรุปว่าไม่น่าลงทุน)
+2. ความมั่นใจเกินจริงโดยไม่มีหลักฐานพอ
+3. ข้อมูลสำคัญจาก agents ที่ถูกมองข้าม
+4. จุดเข้า/ออกที่ไม่มีเหตุผลรองรับชัดเจน
+
+ถ้าพบปัญหา → ระบุว่าต้องแก้ตรงไหน
+ถ้าไม่พบ → ตอบว่า "การวิเคราะห์สมเหตุสมผล"
+ตอบสั้นๆ เป็นภาษาไทย""", 400)
+
+    needs_revision = any(w in reflection for w in [
+        "ขัดแย้ง","ปัญหา","ไม่มีหลักฐาน","มองข้าม","ไม่สมเหตุสมผล","ควรแก้"
+    ])
+
+    if needs_revision:
+        final = run_agent(f"""แก้ไขการวิเคราะห์โดยคำนึงถึงข้อบกพร่องนี้:
+
+การวิเคราะห์เดิม:
+{initial}
+
+ข้อบกพร่องที่พบ:
+{reflection}
+
+เขียนใหม่โดยแก้ไขจุดที่มีปัญหา
 ตอบเป็นภาษาไทย ละเอียด มีตัวเลขชัดเจน""", 3000)
+        return f"{final}\n\n---\n[Self-Reflection: ตรวจพบและแก้ไขปัญหา ✅]\n{reflection}"
+    else:
+        return f"{initial}\n\n---\n[Self-Reflection: ผ่านการตรวจสอบ ✅]"
 
 
 def competitor_agent(company, competitors):
@@ -1301,26 +1635,43 @@ if st.button("Analyze", type="primary") and ticker_input:
             hist, fin, bs, cf = get_chart_data(ticker_input)
             price_summary     = get_price_summary(hist)
             indicators        = get_technical_indicators(hist)
-            news              = get_news(ticker_input)
+            news              = get_news(ticker_input, company.get("name",""))
             macro             = get_macro_data()
             yield_curve       = get_yield_curve()
             geo_indicators    = get_geopolitical_indicators()
             insider_data      = get_insider_short_data(ticker_input)
+            sec_data          = get_sec_financials(ticker_input)
+            options_data      = get_options_data(ticker_input)
+            options_summary   = options_data["summary"] if options_data else ""
+            valuation_ctx     = get_valuation_context(ticker_input)
+            relative_strength = get_relative_strength(ticker_input, company.get("sector","Technology"))
+            mgmt_cred         = get_management_credibility(ticker_input)
+            dcf_val           = calc_simple_dcf(ticker_input)
+            earnings_tx       = get_earnings_transcript(ticker_input)
 
-        with st.spinner("Financial Agent (+ Quarterly + Analyst)..."):
-            fin_result  = financial_agent(company, financials, quarterly, analyst)
-        with st.spinner("Macro Agent (+ Yield Curve)..."):
+        with st.spinner("Financial Agent (CoT + SEC + DCF + Earnings)..."):
+            fin_result  = financial_agent(
+                company, financials, quarterly, analyst,
+                sec_data, valuation_ctx, mgmt_cred, dcf_val, earnings_tx
+            )
+        with st.spinner("Macro Agent (CoT + Full FRED)..."):
             mac_result  = macro_agent(company, macro, yield_curve)
-        with st.spinner("News Agent (10 headlines)..."):
+        with st.spinner("News Agent (CoT + Tavily)..."):
             news_result = news_agent(company, news)
-        with st.spinner("Technical Agent (+ RSI/MACD/ATR/Stochastic)..."):
-            tech_result = technical_agent(company, price_summary, indicators)
-        with st.spinner("Geopolitical Agent (+ War/Policy/Supply Chain)..."):
+        with st.spinner("Technical Agent (CoT + Options + RS)..."):
+            tech_result = technical_agent(
+                company, price_summary, indicators,
+                options_summary, relative_strength
+            )
+        with st.spinner("Geopolitical Agent (CoT + War/Policy)..."):
             geo_result     = geopolitical_agent(company, geo_indicators, news)
         with st.spinner("Insider Agent (+ Short Interest/Institutional)..."):
             insider_result = insider_agent(company, insider_data)
-        with st.spinner("Orchestrator สรุปภาพรวม (ทุก Agent)..."):
-            final       = orchestrator_agent(company, fin_result, mac_result, geo_result, news_result, tech_result)
+        with st.spinner("Orchestrator (Self-Reflection 2 รอบ)..."):
+            final = orchestrator_agent(
+                company, fin_result, mac_result, geo_result,
+                insider_result, news_result, tech_result
+            )
 
         st.session_state["history"][ticker_input] = {
             "company":        company,
