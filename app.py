@@ -137,6 +137,8 @@ if "alerts" not in st.session_state:
     st.session_state["alerts"] = db_load_alerts()
 if "db_history_loaded" not in st.session_state:
     st.session_state["db_history_loaded"] = False
+if "show_portfolio" not in st.session_state:
+    st.session_state["show_portfolio"] = False
 
 # ===== PARSE UPLOADED FILE =====
 def parse_analysis_file(text: str) -> dict | None:
@@ -340,6 +342,117 @@ with st.sidebar:
 
     st.divider()
     st.caption("ปิด browser = ประวัติหาย\nกด Download เพื่อเก็บไฟล์ไว้")
+
+
+# ===== PORTFOLIO DATABASE =====
+def portfolio_add_position(ticker, company_name, shares, entry_price, entry_date, notes=""):
+    db = get_supabase()
+    if not db:
+        return False
+    try:
+        db.table("portfolio").insert({
+            "ticker":       ticker.upper(),
+            "company_name": company_name,
+            "shares":       shares,
+            "entry_price":  entry_price,
+            "entry_date":   entry_date,
+            "notes":        notes,
+        }).execute()
+        return True
+    except Exception as e:
+        st.error(f"เพิ่ม position ไม่ได้: {e}")
+        return False
+
+def portfolio_delete_position(position_id):
+    db = get_supabase()
+    if not db:
+        return
+    try:
+        db.table("portfolio").delete().eq("id", position_id).execute()
+    except:
+        pass
+
+def portfolio_load_positions() -> list:
+    db = get_supabase()
+    if not db:
+        return []
+    try:
+        r = db.table("portfolio").select("*").order("created_at", desc=False).execute()
+        return r.data or []
+    except:
+        return []
+
+def portfolio_add_transaction(ticker, action, shares, price):
+    db = get_supabase()
+    if not db:
+        return
+    try:
+        db.table("portfolio_transactions").insert({
+            "ticker": ticker.upper(),
+            "action": action,
+            "shares": shares,
+            "price":  price,
+            "amount": round(shares * price, 2),
+        }).execute()
+    except:
+        pass
+
+def portfolio_load_transactions() -> list:
+    db = get_supabase()
+    if not db:
+        return []
+    try:
+        r = db.table("portfolio_transactions").select("*").order("created_at", desc=True).limit(50).execute()
+        return r.data or []
+    except:
+        return []
+
+@st.cache_data(ttl=300)
+def portfolio_get_current_prices(tickers: tuple) -> dict:
+    """ดึงราคาปัจจุบันของหุ้นทั้งหมดใน portfolio"""
+    prices = {}
+    for t in tickers:
+        try:
+            info  = yf.Ticker(t).info
+            price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
+            prev  = info.get("previousClose", price)
+            prices[t] = {
+                "price":    round(price, 2),
+                "prev":     round(prev, 2),
+                "day_chg":  round((price - prev) / prev * 100, 2) if prev else 0,
+                "name":     info.get("shortName", t)[:20],
+            }
+        except:
+            prices[t] = {"price": 0, "prev": 0, "day_chg": 0, "name": t}
+    return prices
+
+def portfolio_calc_summary(positions: list, prices: dict) -> dict:
+    """คำนวณสรุป portfolio"""
+    total_cost  = 0
+    total_value = 0
+    total_day_chg = 0
+
+    for p in positions:
+        t     = p["ticker"]
+        cost  = p["shares"] * p["entry_price"]
+        value = p["shares"] * prices.get(t, {}).get("price", p["entry_price"])
+        prev_value = p["shares"] * prices.get(t, {}).get("prev", p["entry_price"])
+        total_cost    += cost
+        total_value   += value
+        total_day_chg += (value - prev_value)
+
+    unrealized_pl  = total_value - total_cost
+    unrealized_pct = round(unrealized_pl / total_cost * 100, 2) if total_cost else 0
+    day_chg_pct    = round(total_day_chg / (total_value - total_day_chg) * 100, 2) if total_value else 0
+
+    return {
+        "total_value":    round(total_value, 2),
+        "total_cost":     round(total_cost, 2),
+        "unrealized_pl":  round(unrealized_pl, 2),
+        "unrealized_pct": unrealized_pct,
+        "day_change":     round(total_day_chg, 2),
+        "day_change_pct": day_chg_pct,
+    }
 
 
 # ===== ALERT SYSTEM =====
@@ -1617,6 +1730,179 @@ def chat_agent(ticker, company, fin_result, mac_result, geo_result, insider_resu
 # ===== UI =====
 st.title("Stock Analyzer")
 st.caption("Multi-Agent Analysis powered by Claude")
+
+# Portfolio shortcut ใน title bar
+if st.button("My Portfolio", key="port_shortcut"):
+    st.session_state["show_portfolio"] = True
+
+# ===== PORTFOLIO PAGE =====
+if st.session_state.get("show_portfolio"):
+
+    col_back, col_title = st.columns([1, 5])
+    if col_back.button("← กลับ"):
+        st.session_state["show_portfolio"] = False
+        st.rerun()
+    col_title.subheader("My Portfolio")
+
+    positions = portfolio_load_positions()
+
+    if positions:
+        tickers_tuple = tuple(set(p["ticker"] for p in positions))
+        prices        = portfolio_get_current_prices(tickers_tuple)
+        summary       = portfolio_calc_summary(positions, prices)
+
+        # ===== SUMMARY HEADER (คล้าย Dime) =====
+        pl_color  = "green" if summary["unrealized_pl"] >= 0 else "red"
+        day_color = "green" if summary["day_change"]    >= 0 else "red"
+        pl_sign   = "+" if summary["unrealized_pl"] >= 0 else ""
+        day_sign  = "+" if summary["day_change"]    >= 0 else ""
+
+        st.markdown(f"""
+<div style="background:var(--color-background-secondary);border-radius:12px;padding:20px;margin-bottom:16px;">
+  <div style="font-size:13px;color:var(--color-text-tertiary);margin-bottom:4px;">Total Asset Value</div>
+  <div style="font-size:32px;font-weight:500;color:var(--color-text-primary);">${summary['total_value']:,.2f} USD</div>
+  <div style="display:flex;gap:24px;margin-top:12px;">
+    <div>
+      <div style="font-size:12px;color:var(--color-text-tertiary);">1-Day Change</div>
+      <div style="font-size:15px;font-weight:500;color:var(--color-text-{'success' if summary['day_change']>=0 else 'danger'});">
+        {day_sign}{summary['day_change_pct']:.2f}%
+      </div>
+    </div>
+    <div>
+      <div style="font-size:12px;color:var(--color-text-tertiary);">Unrealized P/L</div>
+      <div style="font-size:15px;font-weight:500;color:var(--color-text-{'success' if summary['unrealized_pl']>=0 else 'danger'});">
+        {pl_sign}{summary['unrealized_pct']:.2f}% ({pl_sign}${summary['unrealized_pl']:,.2f})
+      </div>
+    </div>
+    <div>
+      <div style="font-size:12px;color:var(--color-text-tertiary);">ต้นทุนรวม</div>
+      <div style="font-size:15px;font-weight:500;color:var(--color-text-primary);">${summary['total_cost']:,.2f}</div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        # ===== HOLDINGS LIST =====
+        st.caption(f"{len(positions)} positions · เรียงตาม Holding Value")
+        st.divider()
+
+        # คำนวณและเรียง
+        holding_list = []
+        for p in positions:
+            t        = p["ticker"]
+            cur      = prices.get(t, {})
+            cur_px   = cur.get("price", p["entry_price"])
+            prev_px  = cur.get("prev", cur_px)
+            value    = round(p["shares"] * cur_px, 2)
+            cost     = round(p["shares"] * p["entry_price"], 2)
+            pl       = round(value - cost, 2)
+            pl_pct   = round(pl / cost * 100, 2) if cost else 0
+            day_chg  = round((cur_px - prev_px) / prev_px * 100, 2) if prev_px else 0
+            port_pct = round(value / summary["total_value"] * 100, 1) if summary["total_value"] else 0
+            holding_list.append({**p, "value": value, "cost": cost, "pl": pl,
+                                  "pl_pct": pl_pct, "day_chg": day_chg,
+                                  "port_pct": port_pct, "cur_price": cur_px})
+
+        holding_list.sort(key=lambda x: x["value"], reverse=True)
+
+        for h in holding_list:
+            pl_col   = "var(--color-text-success)" if h["pl"] >= 0 else "var(--color-text-danger)"
+            pl_sign  = "↑" if h["pl"] >= 0 else "↓"
+            day_col  = "var(--color-text-success)" if h["day_chg"] >= 0 else "var(--color-text-danger)"
+            pl_sign2 = "+" if h["pl"] >= 0 else ""
+
+            c1, c2, c3 = st.columns([3, 3, 3])
+            with c1:
+                st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;padding:8px 0;">
+  <div style="width:40px;height:40px;border-radius:8px;background:var(--color-background-info);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;color:var(--color-text-info);flex-shrink:0;">{h['ticker'][:4]}</div>
+  <div>
+    <div style="font-size:14px;font-weight:500;color:var(--color-text-primary);">{h['ticker']}</div>
+    <div style="font-size:11px;color:var(--color-text-tertiary);">{h['port_pct']}% · {h['shares']} หุ้น</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+            with c2:
+                st.markdown(f"""
+<div style="padding:8px 0;">
+  <div style="font-size:15px;font-weight:500;color:var(--color-text-primary);">${h['value']:,.2f}</div>
+  <div style="font-size:11px;color:var(--color-text-tertiary);">เข้าที่ ${h['entry_price']:.2f} · ปัจจุบัน ${h['cur_price']:.2f}</div>
+</div>""", unsafe_allow_html=True)
+            with c3:
+                st.markdown(f"""
+<div style="padding:8px 0;text-align:right;">
+  <div style="font-size:15px;font-weight:500;color:{pl_col};">{pl_sign} {abs(h['pl_pct']):.2f}%</div>
+  <div style="font-size:11px;color:{pl_col};">({pl_sign2}${h['pl']:,.2f})</div>
+</div>""", unsafe_allow_html=True)
+
+            btn1, btn2, btn3 = st.columns([2, 2, 1])
+            if btn1.button(f"Quick View {h['ticker']}", key=f"qv_{h['id']}"):
+                st.session_state["show_portfolio"] = False
+                st.session_state["load_ticker"]    = h["ticker"]
+                st.rerun()
+            if btn2.button(f"Analyze {h['ticker']}", key=f"an_{h['id']}"):
+                st.session_state["show_portfolio"] = False
+                st.session_state["load_ticker"]    = h["ticker"]
+                st.rerun()
+            if btn3.button("ลบ", key=f"del_pos_{h['id']}"):
+                portfolio_delete_position(h["id"])
+                st.rerun()
+            st.divider()
+
+    else:
+        st.info("ยังไม่มีหุ้นใน portfolio — เพิ่มได้เลยด้านล่าง")
+
+    # ===== ADD POSITION FORM =====
+    st.subheader("เพิ่มหุ้น")
+    with st.form("add_position_form", clear_on_submit=True):
+        fc1, fc2 = st.columns(2)
+        f_ticker  = fc1.text_input("Ticker", placeholder="IONQ").upper().strip()
+        f_shares  = fc2.number_input("จำนวนหุ้น", min_value=0.01, step=1.0, value=100.0)
+        fc3, fc4  = st.columns(2)
+        f_price   = fc3.number_input("ราคาที่เข้า ($)", min_value=0.01, step=0.01, value=0.01)
+        f_date    = fc4.date_input("วันที่เข้า", value=datetime.now().date())
+        f_notes   = st.text_input("หมายเหตุ (ไม่บังคับ)", placeholder="เช่น DCA รอบที่ 1")
+
+        # ถ้าไม่ใส่ราคา — ดึงราคาปัจจุบันให้อัตโนมัติ
+        use_market = st.checkbox("ใช้ราคาตลาดปัจจุบัน", value=False)
+        submitted  = st.form_submit_button("เพิ่มลง Portfolio", use_container_width=True)
+
+        if submitted and f_ticker:
+            if use_market or f_price <= 0.01:
+                try:
+                    f_price = yf.Ticker(f_ticker).fast_info.last_price
+                except:
+                    st.error("ดึงราคาตลาดไม่ได้ กรุณาใส่ราคาเอง")
+                    f_price = 0
+            if f_price > 0 and f_shares > 0:
+                try:
+                    cname = yf.Ticker(f_ticker).info.get("shortName", f_ticker)
+                except:
+                    cname = f_ticker
+                ok = portfolio_add_position(f_ticker, cname, f_shares, f_price,
+                                             str(f_date), f_notes)
+                if ok:
+                    portfolio_add_transaction(f_ticker, "BUY", f_shares, f_price)
+                    st.success(f"เพิ่ม {f_ticker} × {f_shares} @ ${f_price:.2f} แล้ว")
+                    st.rerun()
+
+    # ===== TRANSACTION HISTORY =====
+    with st.expander("ประวัติการซื้อขาย"):
+        txns = portfolio_load_transactions()
+        if txns:
+            for tx in txns:
+                sign = "BUY" if tx["action"] == "BUY" else "SELL"
+                col  = "var(--color-text-success)" if tx["action"] == "BUY" else "var(--color-text-danger)"
+                st.markdown(
+                    f'<span style="color:{col};font-size:12px;">{sign}</span> '
+                    f'<span style="font-size:13px;">{tx["ticker"]} × {tx["shares"]} @ ${tx["price"]:.2f} '
+                    f'= ${tx["amount"]:,.2f}</span> '
+                    f'<span style="font-size:11px;color:var(--color-text-tertiary);">{str(tx.get("created_at",""))[:10]}</span>',
+                    unsafe_allow_html=True
+                )
+        else:
+            st.caption("ยังไม่มีประวัติ")
+
+    st.stop()
 
 if "load_ticker" in st.session_state:
     ticker_input = st.session_state.pop("load_ticker")
