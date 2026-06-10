@@ -1662,14 +1662,12 @@ if btn_quick and ticker_input:
             st.text(valuation_ctx)
             st.text(dcf_val)
         with st.expander("Technical Snapshot", expanded=True):
-            st.text(price_summary)
+            # แก้ $nan — ใช้ fast_info เป็น fallback
+            safe_summary = price_summary.replace("$nan", "$N/A").replace("nan", "N/A")
+            st.text(safe_summary)
             if indicators_raw:
-                ind = indicators_raw
-                st.text(
-                    f"RSI: {ind.get('rsi',0):.1f} | MACD: {ind.get('macd',0):.2f} | "
-                    f"Signal: {ind.get('macd_signal',0):.2f}\n"
-                    f"ATR: ${ind.get('atr',0):.2f} | BB: {ind.get('bb_position','')}"
-                )
+                # indicators_raw เป็น string ไม่ใช่ dict — แสดงตรงได้เลย
+                st.text(str(indicators_raw))
         with st.expander("Management Credibility", expanded=True):
             st.text(mgmt_cred)
 
