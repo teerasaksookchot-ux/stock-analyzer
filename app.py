@@ -498,11 +498,15 @@ def get_chart_data(ticker):
 def get_price_summary(hist):
     if hist is None or hist.empty:
         return "ไม่มีข้อมูลราคา"
-    return (f"ราคาล่าสุด: ${hist['Close'].iloc[-1]:.2f} | "
-            f"6M High: ${hist['Close'].max():.2f} | "
-            f"6M Low: ${hist['Close'].min():.2f} | "
-            f"MA20: ${hist['Close'].tail(20).mean():.2f} | "
-            f"MA50: ${hist['Close'].tail(50).mean():.2f} | "
+    closes = hist["Close"].dropna()
+    if closes.empty:
+        return "ไม่มีข้อมูลราคา"
+    latest = closes.iloc[-1]
+    return (f"ราคาล่าสุด: ${latest:.2f} | "
+            f"6M High: ${closes.max():.2f} | "
+            f"6M Low: ${closes.min():.2f} | "
+            f"MA20: ${closes.tail(20).mean():.2f} | "
+            f"MA50: ${closes.tail(50).mean():.2f} | "
             f"Avg Volume: {int(hist['Volume'].mean()):,}")
 
 def get_realtime_price(ticker):
@@ -714,13 +718,16 @@ def get_geopolitical_indicators():
     results = {}
     for name, sym in indicators.items():
         try:
-            hist = yf.Ticker(sym).history(period="5d")
-            if hist.empty:
+            hist   = yf.Ticker(sym).history(period="5d")
+            closes = hist["Close"].dropna() if not hist.empty else pd.Series()
+            if len(closes) < 2:
                 continue
-            cur    = hist["Close"].iloc[-1]
-            prev   = hist["Close"].iloc[0]
-            chg    = round((cur - prev) / prev * 100, 1)
-            sign   = "+" if chg >= 0 else ""
+            cur  = closes.iloc[-1]
+            prev = closes.iloc[0]
+            if prev == 0 or str(cur) == "nan" or str(prev) == "nan":
+                continue
+            chg  = round((cur - prev) / prev * 100, 1)
+            sign = "+" if chg >= 0 else ""
             results[name] = f"{cur:.2f} ({sign}{chg}% 5d)"
         except:
             pass
@@ -941,10 +948,20 @@ def get_relative_strength(ticker: str, sector: str) -> str:
             h = yf.Ticker(sym).history(period="6mo")
             if h.empty:
                 continue
+            closes = h["Close"].dropna()
+            if len(closes) < 5:
+                continue
+            n = len(closes)
+            def safe_ret(a, b):
+                try:
+                    v = round((a/b - 1)*100, 1)
+                    return v if str(v) != "nan" else 0
+                except:
+                    return 0
             results[label] = {
-                "1M": round((h["Close"].iloc[-1]/h["Close"].iloc[-22]-1)*100, 1) if len(h)>=22 else 0,
-                "3M": round((h["Close"].iloc[-1]/h["Close"].iloc[-66]-1)*100, 1) if len(h)>=66 else 0,
-                "6M": round((h["Close"].iloc[-1]/h["Close"].iloc[0]-1)*100, 1),
+                "1M": safe_ret(closes.iloc[-1], closes.iloc[-22]) if n>=22 else 0,
+                "3M": safe_ret(closes.iloc[-1], closes.iloc[-66]) if n>=66 else 0,
+                "6M": safe_ret(closes.iloc[-1], closes.iloc[0]),
             }
         except:
             pass
@@ -1666,8 +1683,8 @@ if btn_quick and ticker_input:
             safe_summary = price_summary.replace("$nan", "$N/A").replace("nan", "N/A")
             st.text(safe_summary)
             if indicators_raw:
-                # indicators_raw เป็น string ไม่ใช่ dict — แสดงตรงได้เลย
-                st.text(str(indicators_raw))
+                ind_display = str(indicators_raw).replace("nan", "N/A").replace("$nan", "$N/A")
+                st.text(ind_display)
         with st.expander("Management Credibility", expanded=True):
             st.text(mgmt_cred)
 
@@ -1682,7 +1699,7 @@ if btn_quick and ticker_input:
             geo_str = "\n".join([f"{k}: {v}" for k,v in geo_ind.items()]) if geo_ind else "N/A"
             st.text(geo_str)
         with st.expander("Relative Performance", expanded=True):
-            st.text(relative_str)
+            st.text(relative_str.replace("nan", "N/A"))
         if insider_short:
             with st.expander("Short Interest", expanded=True):
                 st.text(
