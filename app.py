@@ -281,6 +281,12 @@ with st.sidebar:
     st.subheader("⚡ Price Alert")
 
     has_telegram = bool(st.secrets.get("TELEGRAM_TOKEN")) and bool(st.secrets.get("TELEGRAM_CHAT_ID"))
+    has_tavily = bool(st.secrets.get("TAVILY_API_KEY"))
+    if has_tavily:
+        st.caption("Tavily ✅ ข่าวสดเปิดใช้งานแล้ว")
+    else:
+        st.caption("Tavily ⚠️ ยังไม่ได้ตั้งค่า (ใช้ Yahoo News แทน) — สมัครฟรีที่ app.tavily.com แล้วใส่ TAVILY_API_KEY ใน Secrets")
+
     if not has_telegram:
         with st.expander("ตั้งค่า Telegram ก่อนใช้งาน"):
             st.caption("""1. สร้าง bot ที่ @BotFather → /newbot\n2. Copy token ที่ได้\n3. ไปที่ Streamlit Cloud → Settings → Secrets ใส่:\n   TELEGRAM_TOKEN = "your_token"\n   TELEGRAM_CHAT_ID = "your_chat_id"\n4. หา chat_id: เปิด t.me/userinfobot แล้วกด Start""")
@@ -506,24 +512,63 @@ def get_realtime_price(ticker):
     except:
         return 0
 
-def get_news(ticker):
+def get_news_yfinance(ticker):
+    """fallback: ดึงข่าวจาก Yahoo Finance"""
     try:
         news = yf.Ticker(ticker).news
         if not news:
-            return "ไม่มีข่าว"
-        return "\n".join([f"- {n.get('content', {}).get('title', 'N/A')}" for n in news[:10]])
+            return "ไม่มีข่าว (Yahoo Finance)"
+        return "\n".join([f"- {n.get('content', {}).get('title', 'N/A')}" for n in news[:5]])
     except:
         return "ไม่มีข่าว"
 
-def get_macro_data():
+def get_news(ticker, company_name=""):
+    """ดึงข่าวจาก Tavily (ถ้ามี key) ไม่งั้น fallback Yahoo Finance"""
+    tavily_key = st.secrets.get("TAVILY_API_KEY", "")
+    if not tavily_key:
+        return get_news_yfinance(ticker)
     try:
-        fed = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=FEDFUNDS", timeout=5).text.strip().split("\n")[-1]
-        cpi = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL", timeout=5).text.strip().split("\n")[-1]
-        fd, fr = fed.split(",")
-        cd, cv = cpi.split(",")
-        return f"Fed Rate: {fr}% (ณ {fd}) | CPI: {cv} (ณ {cd})"
+        from tavily import TavilyClient
+        client  = TavilyClient(api_key=tavily_key)
+        results = client.search(
+            query=f"{ticker} {company_name} stock news latest 2025",
+            search_depth="basic",
+            max_results=10,
+        )
+        articles = results.get("results", [])
+        if not articles:
+            return get_news_yfinance(ticker)
+        news_text = "\n".join([
+            f"- [{a.get('title','N/A')}] {a.get('content','')[:300]}"
+            for a in articles
+        ])
+        return f"[Tavily — {len(articles)} บทความ]\n{news_text}"
     except:
-        return "ไม่สามารถดึงข้อมูล macro ได้"
+        return get_news_yfinance(ticker)
+
+def get_macro_data():
+    """ดึง macro indicators ครบชุดจาก FRED"""
+    series = {
+        "FEDFUNDS": "Fed Rate (%)",
+        "CPIAUCSL": "CPI",
+        "GDP":      "GDP (B$)",
+        "UNRATE":   "Unemployment (%)",
+        "UMCSENT":  "Consumer Sentiment",
+        "NAPM":     "Manufacturing PMI",
+    }
+    results = []
+    for sid, name in series.items():
+        try:
+            rows = requests.get(
+                f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}",
+                timeout=5
+            ).text.strip().split("\n")
+            last = rows[-1].split(",")
+            if len(last) == 2 and last[1] not in (".", ""):
+                results.append(f"{name}: {last[1]} (ณ {last[0][:7]})")
+        except:
+            pass
+    return " | ".join(results) if results else "ไม่สามารถดึงข้อมูล macro ได้"
 
 
 def get_technical_indicators(hist):
@@ -739,6 +784,118 @@ def get_competitors(ticker, sector):
         except:
             pass
     return results
+
+# ===== SEC EDGAR (Official Financial Data) =====
+@st.cache_data(ttl=86400)
+def get_sec_financials(ticker: str) -> str:
+    """ดึงงบการเงิน official จาก SEC EDGAR"""
+    try:
+        headers = {"User-Agent": "StockAnalyzer app@stockanalyzer.com"}
+
+        # หา CIK จาก ticker
+        tickers_data = requests.get(
+            "https://www.sec.gov/files/company_tickers.json",
+            headers=headers, timeout=10
+        ).json()
+
+        cik = None
+        for _, val in tickers_data.items():
+            if val.get("ticker", "").upper() == ticker.upper():
+                cik = str(val["cik_str"]).zfill(10)
+                break
+
+        if not cik:
+            return "SEC EDGAR: ไม่พบ CIK"
+
+        # ดึง company facts
+        facts = requests.get(
+            f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json",
+            headers=headers, timeout=15
+        ).json()
+
+        us_gaap = facts.get("facts", {}).get("us-gaap", {})
+
+        def get_annual(concept):
+            data = us_gaap.get(concept, {}).get("units", {}).get("USD", [])
+            annual = [d for d in data if d.get("form") == "10-K"]
+            annual.sort(key=lambda x: x.get("end", ""), reverse=True)
+            return [(d["end"][:4], round(d["val"]/1e9, 2)) for d in annual[:4]]
+
+        rev  = get_annual("Revenues") or get_annual("RevenueFromContractWithCustomerExcludingAssessedTax")
+        ni   = get_annual("NetIncomeLoss")
+        debt = get_annual("LongTermDebt")
+
+        lines = [f"=== SEC EDGAR Official (CIK: {cik}) ==="]
+        if rev:
+            lines.append("Revenue (B$): " + " | ".join([f"{y}: ${v}" for y,v in rev]))
+        if ni:
+            lines.append("Net Income (B$): " + " | ".join([f"{y}: ${v}" for y,v in ni]))
+        if debt:
+            lines.append("Long-term Debt (B$): " + " | ".join([f"{y}: ${v}" for y,v in debt]))
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"SEC EDGAR: ไม่สามารถดึงข้อมูลได้ ({e})"
+
+# ===== OPTIONS DATA =====
+@st.cache_data(ttl=1800)
+def get_options_data(ticker: str) -> dict | None:
+    """ดึง Put/Call Ratio, IV, Max Pain จาก yfinance options"""
+    try:
+        stock = yf.Ticker(ticker)
+        exps  = stock.options
+        if not exps:
+            return None
+
+        opt       = stock.option_chain(exps[0])
+        calls     = opt.calls
+        puts      = opt.puts
+        cur_price = stock.fast_info.last_price
+
+        # Put/Call Ratio
+        call_vol  = calls["volume"].sum()
+        put_vol   = puts["volume"].sum()
+        pc_ratio  = round(put_vol / call_vol, 2) if call_vol > 0 else 0
+
+        # Implied Volatility (ATM)
+        atm_c = calls[abs(calls["strike"] - cur_price) < cur_price * 0.05]
+        atm_p = puts[abs(puts["strike"]  - cur_price) < cur_price * 0.05]
+        iv    = pd.concat([atm_c["impliedVolatility"],
+                           atm_p["impliedVolatility"]]).mean()
+        iv_pct = round(iv * 100, 1) if not pd.isna(iv) else 0
+
+        # Max Pain
+        strikes = sorted(set(calls["strike"].tolist() + puts["strike"].tolist()))
+        pain = {}
+        for s in strikes:
+            pain[s] = (calls[calls["strike"] >= s]["openInterest"].sum() +
+                       puts[puts["strike"]  <= s]["openInterest"].sum())
+        max_pain = min(pain, key=pain.get) if pain else 0
+
+        # Signals
+        pc_signal = ("Bearish มาก" if pc_ratio > 1.5 else
+                     "กลาง-ลบ"     if pc_ratio > 1.0 else
+                     "Bullish"      if pc_ratio < 0.5 else "กลาง")
+        iv_signal = ("สูง (ตลาดกังวล)" if iv_pct > 50 else
+                     "ต่ำ (ตลาดนิ่ง)"   if iv_pct < 25 else "ปกติ")
+
+        return {
+            "pc_ratio":   pc_ratio,
+            "pc_signal":  pc_signal,
+            "iv":         iv_pct,
+            "iv_signal":  iv_signal,
+            "max_pain":   round(max_pain, 2),
+            "expiration": exps[0],
+            "call_vol":   int(call_vol),
+            "put_vol":    int(put_vol),
+            "summary":    (f"Put/Call Ratio: {pc_ratio} ({pc_signal}) | "
+                           f"IV: {iv_pct}% ({iv_signal}) | "
+                           f"Max Pain: ${max_pain:.2f} | "
+                           f"Expiry: {exps[0]}"),
+        }
+    except:
+        return None
+
 
 # ===== CHART CALCULATIONS =====
 
@@ -1296,6 +1453,15 @@ if st.button("Analyze", type="primary") and ticker_input:
 
     with tab_tech:
         st.subheader(f"Technical Analysis — {ticker_input}")
+        if options_data:
+            oc1, oc2, oc3, oc4 = st.columns(4)
+            oc1.metric("Put/Call Ratio", options_data["pc_ratio"],
+                        delta=options_data["pc_signal"])
+            oc2.metric("Implied Volatility", f"{options_data['iv']}%",
+                        delta=options_data["iv_signal"])
+            oc3.metric("Max Pain", f"${options_data['max_pain']:.2f}")
+            oc4.metric("Expiry", options_data["expiration"])
+            st.divider()
         st.markdown(tech_result)
 
     with tab_full:
