@@ -5,3 +5,4 @@ requests
 plotly
 scipy
 supabase
+tavily-python
