@@ -344,66 +344,91 @@ with st.sidebar:
     st.caption("ปิด browser = ประวัติหาย\nกด Download เพื่อเก็บไฟล์ไว้")
 
 
-# ===== PORTFOLIO DATABASE =====
+# ===== PORTFOLIO DATABASE (ใช้ requests โดยตรง) =====
+def _sb_headers() -> dict:
+    key = st.secrets.get("SUPABASE_KEY", "")
+    return {
+        "apikey":        key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=representation",
+    }
+
+def _sb_url(table: str) -> str:
+    return st.secrets.get("SUPABASE_URL", "") + f"/rest/v1/{table}"
+
 def portfolio_add_position(ticker, company_name, shares, entry_price, entry_date, notes=""):
-    db = get_supabase()
-    if not db:
-        return False
     try:
-        db.table("portfolios").insert({
-            "ticker":       ticker.upper(),
-            "company_name": company_name,
-            "shares":       shares,
-            "entry_price":  entry_price,
-            "entry_date":   entry_date,
-            "notes":        notes,
-        }).execute()
-        return True
+        r = requests.post(
+            _sb_url("portfolios"),
+            headers=_sb_headers(),
+            json={
+                "ticker":       ticker.upper(),
+                "company_name": str(company_name),
+                "shares":       float(shares),
+                "entry_price":  float(entry_price),
+                "entry_date":   str(entry_date),
+                "notes":        str(notes),
+            },
+            timeout=10,
+        )
+        if r.status_code in (200, 201):
+            return True
+        st.error(f"เพิ่ม position ไม่ได้: {r.json()}")
+        return False
     except Exception as e:
         st.error(f"เพิ่ม position ไม่ได้: {e}")
         return False
 
 def portfolio_delete_position(position_id):
-    db = get_supabase()
-    if not db:
-        return
     try:
-        db.table("portfolios").delete().eq("id", position_id).execute()
+        requests.delete(
+            _sb_url("portfolios"),
+            headers=_sb_headers(),
+            params={"id": f"eq.{position_id}"},
+            timeout=10,
+        )
     except:
         pass
 
 def portfolio_load_positions() -> list:
-    db = get_supabase()
-    if not db:
-        return []
     try:
-        r = db.table("portfolios").select("*").order("created_at", desc=False).execute()
-        return r.data or []
+        r = requests.get(
+            _sb_url("portfolios"),
+            headers=_sb_headers(),
+            params={"order": "created_at.asc"},
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else []
     except:
         return []
 
 def portfolio_add_transaction(ticker, action, shares, price):
-    db = get_supabase()
-    if not db:
-        return
     try:
-        db.table("portfolio_transactions").insert({
-            "ticker": ticker.upper(),
-            "action": action,
-            "shares": shares,
-            "price":  price,
-            "amount": round(shares * price, 2),
-        }).execute()
+        requests.post(
+            _sb_url("portfolio_transactions"),
+            headers=_sb_headers(),
+            json={
+                "ticker": ticker.upper(),
+                "action": action,
+                "shares": float(shares),
+                "price":  float(price),
+                "amount": round(float(shares) * float(price), 2),
+            },
+            timeout=10,
+        )
     except:
         pass
 
 def portfolio_load_transactions() -> list:
-    db = get_supabase()
-    if not db:
-        return []
     try:
-        r = db.table("portfolio_transactions").select("*").order("created_at", desc=True).limit(50).execute()
-        return r.data or []
+        r = requests.get(
+            _sb_url("portfolio_transactions"),
+            headers=_sb_headers(),
+            params={"order": "created_at.desc", "limit": "50"},
+            timeout=10,
+        )
+        return r.json() if r.status_code == 200 else []
     except:
         return []
 
