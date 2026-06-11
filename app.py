@@ -1297,8 +1297,9 @@ def get_sec_financials(ticker: str) -> str:
 def get_options_data(ticker: str) -> dict | None:
     """ดึง Put/Call Ratio, IV, Max Pain จาก yfinance options"""
     try:
+        hub   = get_ticker_hub(ticker)
+        exps  = hub["options_exp"]
         stock = yf.Ticker(ticker)
-        exps  = stock.options
         if not exps:
             return None
 
@@ -1353,11 +1354,14 @@ def get_options_data(ticker: str) -> dict | None:
 
 
 # ===== VALUATION CONTEXT =====
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=1800)
 def get_valuation_context(ticker: str) -> str:
     try:
+        hub   = get_ticker_hub(ticker)
+        info  = hub["info"]
+        if not info:
+            return "Valuation Context: ดึงไม่ได้ (rate limit)"
         stock = yf.Ticker(ticker)
-        info  = stock.info
         pe    = info.get("trailingPE", 0) or 0
         fwd_pe = info.get("forwardPE", 0) or 0
         pb    = info.get("priceToBook", 0) or 0
@@ -1424,10 +1428,11 @@ def get_relative_strength(ticker: str, sector: str) -> str:
     return "\n".join(lines)
 
 # ===== MANAGEMENT CREDIBILITY =====
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=1800)
 def get_management_credibility(ticker: str) -> str:
     try:
-        earnings = yf.Ticker(ticker).earnings_history
+        hub      = get_ticker_hub(ticker)
+        earnings = hub["earnings_history"]
         if earnings is None or earnings.empty:
             return "Management: ไม่มีข้อมูล"
         beat = miss = 0
@@ -1458,12 +1463,15 @@ def get_management_credibility(ticker: str) -> str:
         return "Management Credibility: ดึงไม่ได้"
 
 # ===== DCF VALUATION =====
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=1800)
 def calc_simple_dcf(ticker: str) -> str:
     try:
+        hub   = get_ticker_hub(ticker)
+        info  = hub["info"]
+        cf    = hub["cashflow"]
+        if not info:
+            return "DCF: ดึงข้อมูลไม่ได้ (rate limit)"
         stock = yf.Ticker(ticker)
-        info  = stock.info
-        cf    = stock.cashflow
         if cf is None or cf.empty or "Free Cash Flow" not in cf.index:
             return "DCF: ไม่มีข้อมูล FCF"
         fcf_vals = cf.loc["Free Cash Flow"].dropna()
