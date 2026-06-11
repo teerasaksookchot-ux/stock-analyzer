@@ -1026,13 +1026,16 @@ def get_macro_data():
 def get_technical_indicators(hist):
     """คำนวณ technical indicators ครบชุด"""
     try:
-        c = hist["Close"]
-        h = hist["High"]
-        l = hist["Low"]
+        c = hist["Close"].dropna()
+        h = hist["High"].dropna()
+        l = hist["Low"].dropna()
 
-        # RSI
-        d   = c.diff()
-        rsi = 100 - (100 / (1 + d.clip(lower=0).rolling(14).mean() / (-d.clip(upper=0)).rolling(14).mean()))
+        # RSI — ใช้ min_periods และ dropna เพื่อกัน NaN gaps
+        d    = c.diff()
+        gain = d.clip(lower=0).rolling(14, min_periods=1).mean()
+        loss = (-d.clip(upper=0)).rolling(14, min_periods=1).mean()
+        rs   = gain / loss.replace(0, float("nan"))
+        rsi  = (100 - (100 / (1 + rs)))
 
         # MACD
         ema12    = c.ewm(span=12, adjust=False).mean()
@@ -1502,7 +1505,11 @@ def get_management_credibility(ticker: str) -> str:
             estimate = row.get("epsEstimate")
             if actual is None or estimate is None or estimate == 0:
                 continue
+            if pd.isna(estimate) or estimate == 0:
+                continue
             surp = round((actual - estimate)/abs(estimate)*100, 1)
+            if pd.isna(surp):
+                continue
             total_surp += surp
             beat += 1 if surp > 0 else 0
             miss += 1 if surp <= 0 else 0
