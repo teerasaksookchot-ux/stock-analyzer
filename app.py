@@ -566,13 +566,28 @@ def _clean_content(text: str) -> str:
     text = _re.sub(r'https?://\S+', '', text)
     # ลบ (BUSINESS WIRE)--, (PR NEWSWIRE)-- prefix
     text = _re.sub(r'\([A-Z ]+\)--', '', text)
-    # ลบ NYSE: IONQ, XNYS:IONQ type
+    # ลบ NYSE: IONQ type
     text = _re.sub(r'[A-Z]+:[A-Z]+,?\s?', '', text)
-    # ลบ table rows (| data | data |)
+    # ลบ table rows
     text = _re.sub(r'\|[^\n]+\|', '', text)
     # ลบ "Read More" navigation
     text = _re.sub(r'Read More\s*', '', text, flags=_re.IGNORECASE)
-    # ลบ whitespace ซ้ำ
+    # ลบบรรทัดที่ขึ้นต้นด้วย # * - (navigation/sidebar)
+    lines = text.split('.')
+    clean_lines = []
+    skip_words = ["best gift", "home page", "search for symbol",
+                  "power to investor", "sign in", "subscribe",
+                  "advertisement", "cookie", "privacy policy"]
+    for line in lines:
+        stripped = line.strip()
+        # ข้าม bullet points และ sidebar content
+        if stripped.startswith(("#","*","- Best","- How","- What")):
+            continue
+        if any(s in stripped.lower() for s in skip_words):
+            continue
+        if len(stripped) > 15:   # ข้าม fragment สั้นเกิน
+            clean_lines.append(stripped)
+    text = ". ".join(clean_lines[:3])  # เอาแค่ 3 ประโยคแรก
     text = _re.sub(r'\s+', ' ', text).strip()
     return text[:220]
 
