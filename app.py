@@ -1357,34 +1357,51 @@ def get_options_data(ticker: str) -> dict | None:
 # ===== TICKER DATA HUB =====
 @st.cache_data(ttl=1800)
 def get_ticker_hub(ticker: str) -> dict:
-    """ดึงข้อมูลจาก yfinance ครั้งเดียว share ให้ทุกฟังก์ชัน ลด rate limit"""
+    """ดึงข้อมูลจาก yfinance ครั้งเดียว — retry ถ้า info ว่าง"""
     import time as _t
     stock = yf.Ticker(ticker)
     hub   = {"info":{}, "financials":None, "cashflow":None,
              "balance_sheet":None, "quarterly":None,
              "earnings_history":None, "options_exp":None}
-    try:
-        hub["info"] = stock.info or {}; _t.sleep(0.15)
+
+    # ดึง info พร้อม retry 2 รอบ
+    for attempt in range(3):
+        try:
+            result = stock.info or {}
+            if result and result.get("symbol"):
+                hub["info"] = result
+                break
+            _t.sleep(0.5 * (attempt + 1))
+        except:
+            _t.sleep(0.5 * (attempt + 1))
+
+    # ถ้า info ยังว่าง ลอง fast_info
+    if not hub["info"].get("currentPrice"):
+        try:
+            fi    = stock.fast_info
+            price = float(fi.last_price or 0)
+            if price:
+                hub["info"]["currentPrice"]  = price
+                hub["info"]["previousClose"] = float(fi.previous_close or price)
+                hub["info"]["marketCap"]     = float(fi.market_cap or 0)
+                hub["info"]["fiftyTwoWeekHigh"] = float(fi.fifty_two_week_high or 0)
+                hub["info"]["fiftyTwoWeekLow"]  = float(fi.fifty_two_week_low or 0)
+        except: pass
+
+    _t.sleep(0.2)
+    try: hub["financials"]    = stock.financials;           _t.sleep(0.1)
     except: pass
-    try:
-        hub["financials"] = stock.financials; _t.sleep(0.1)
+    try: hub["cashflow"]      = stock.cashflow;             _t.sleep(0.1)
     except: pass
-    try:
-        hub["cashflow"] = stock.cashflow; _t.sleep(0.1)
+    try: hub["balance_sheet"] = stock.balance_sheet;        _t.sleep(0.1)
     except: pass
-    try:
-        hub["balance_sheet"] = stock.balance_sheet; _t.sleep(0.1)
+    try: hub["quarterly"]     = stock.quarterly_financials; _t.sleep(0.1)
     except: pass
-    try:
-        hub["quarterly"] = stock.quarterly_financials; _t.sleep(0.1)
+    try: hub["earnings_history"] = stock.earnings_history;  _t.sleep(0.1)
     except: pass
-    try:
-        hub["earnings_history"] = stock.earnings_history; _t.sleep(0.1)
+    try: hub["options_exp"]   = stock.options
     except: pass
-    try:
-        hub["options_exp"] = stock.options
-    except: pass
-    # Fallback sector/industry
+
     if not hub["info"].get("sector"):
         try:
             fi = stock.fast_info
@@ -1397,10 +1414,10 @@ def get_ticker_hub(ticker: str) -> dict:
 @st.cache_data(ttl=1800)
 def get_valuation_context(ticker: str) -> str:
     try:
-        hub   = get_ticker_hub(ticker)
-        info  = hub["info"]
-        if not info:
-            return "Valuation Context: ดึงไม่ได้ (rate limit)"
+        hub  = get_ticker_hub(ticker)
+        info = hub["info"]
+        if not info or not info.get("trailingPE"):
+            info = yf.Ticker(ticker).info or {}
         stock = yf.Ticker(ticker)
         pe    = info.get("trailingPE", 0) or 0
         fwd_pe = info.get("forwardPE", 0) or 0
@@ -1473,6 +1490,8 @@ def get_management_credibility(ticker: str) -> str:
     try:
         hub      = get_ticker_hub(ticker)
         earnings = hub["earnings_history"]
+        if earnings is None:
+            earnings = yf.Ticker(ticker).earnings_history
         if earnings is None or earnings.empty:
             return "Management: ไม่มีข้อมูล"
         beat = miss = 0
@@ -1506,11 +1525,14 @@ def get_management_credibility(ticker: str) -> str:
 @st.cache_data(ttl=1800)
 def calc_simple_dcf(ticker: str) -> str:
     try:
-        hub   = get_ticker_hub(ticker)
-        info  = hub["info"]
-        cf    = hub["cashflow"]
-        if not info:
-            return "DCF: ดึงข้อมูลไม่ได้ (rate limit)"
+        hub  = get_ticker_hub(ticker)
+        info = hub["info"]
+        cf   = hub["cashflow"]
+        # Fallback ถ้า hub ว่าง
+        if not info or not info.get("sharesOutstanding"):
+            info = yf.Ticker(ticker).info or {}
+        if cf is None:
+            cf = yf.Ticker(ticker).cashflow
         stock = yf.Ticker(ticker)
         if cf is None or cf.empty or "Free Cash Flow" not in cf.index:
             return "DCF: ไม่มีข้อมูล FCF"
