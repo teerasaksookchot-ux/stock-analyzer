@@ -433,6 +433,21 @@ def portfolio_load_transactions() -> list:
     except:
         return []
 
+@st.cache_data(ttl=3600)
+def get_usd_thb_rate() -> float:
+    """ดึง USD/THB exchange rate"""
+    try:
+        rate = yf.Ticker("USDTHB=X").fast_info.last_price
+        return round(rate, 2) if rate and rate > 0 else 32.84
+    except:
+        return 32.84
+
+BADGE_COLORS = [
+    ("#E6F1FB","#185FA5"), ("#E1F5EE","#0F6E56"), ("#EEEDFE","#3C3489"),
+    ("#FAEEDA","#854F0B"), ("#FCEBEB","#A32D2D"), ("#EAF3DE","#3B6D11"),
+    ("#FBEAF0","#993556"), ("#E1F5EE","#085041"), ("#FAEEDA","#633806"),
+]
+
 @st.cache_data(ttl=300)
 def portfolio_get_current_prices(tickers: tuple) -> dict:
     """ดึงราคาปัจจุบันของหุ้นทั้งหมดใน portfolio"""
@@ -1761,15 +1776,14 @@ st.caption("Multi-Agent Analysis powered by Claude")
 if st.button("My Portfolio", key="port_shortcut"):
     st.session_state["show_portfolio"] = True
 
-# ===== PORTFOLIO PAGE =====
+# ===== PORTFOLIO PAGE (Dime Style) =====
 if st.session_state.get("show_portfolio"):
 
-    col_back, col_title = st.columns([1, 5])
-    if col_back.button("← กลับ"):
+    if st.button("← กลับ"):
         st.session_state["show_portfolio"] = False
         st.rerun()
-    col_title.subheader("My Portfolio")
 
+    rate      = get_usd_thb_rate()
     positions = portfolio_load_positions()
 
     if positions:
@@ -1777,44 +1791,9 @@ if st.session_state.get("show_portfolio"):
         prices        = portfolio_get_current_prices(tickers_tuple)
         summary       = portfolio_calc_summary(positions, prices)
 
-        # ===== SUMMARY HEADER (คล้าย Dime) =====
-        pl_color  = "green" if summary["unrealized_pl"] >= 0 else "red"
-        day_color = "green" if summary["day_change"]    >= 0 else "red"
-        pl_sign   = "+" if summary["unrealized_pl"] >= 0 else ""
-        day_sign  = "+" if summary["day_change"]    >= 0 else ""
-
-        st.markdown(f"""
-<div style="background:var(--color-background-secondary);border-radius:12px;padding:20px;margin-bottom:16px;">
-  <div style="font-size:13px;color:var(--color-text-tertiary);margin-bottom:4px;">Total Asset Value</div>
-  <div style="font-size:32px;font-weight:500;color:var(--color-text-primary);">${summary['total_value']:,.2f} USD</div>
-  <div style="display:flex;gap:24px;margin-top:12px;">
-    <div>
-      <div style="font-size:12px;color:var(--color-text-tertiary);">1-Day Change</div>
-      <div style="font-size:15px;font-weight:500;color:var(--color-text-{'success' if summary['day_change']>=0 else 'danger'});">
-        {day_sign}{summary['day_change_pct']:.2f}%
-      </div>
-    </div>
-    <div>
-      <div style="font-size:12px;color:var(--color-text-tertiary);">Unrealized P/L</div>
-      <div style="font-size:15px;font-weight:500;color:var(--color-text-{'success' if summary['unrealized_pl']>=0 else 'danger'});">
-        {pl_sign}{summary['unrealized_pct']:.2f}% ({pl_sign}${summary['unrealized_pl']:,.2f})
-      </div>
-    </div>
-    <div>
-      <div style="font-size:12px;color:var(--color-text-tertiary);">ต้นทุนรวม</div>
-      <div style="font-size:15px;font-weight:500;color:var(--color-text-primary);">${summary['total_cost']:,.2f}</div>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-        # ===== HOLDINGS LIST =====
-        st.caption(f"{len(positions)} positions · เรียงตาม Holding Value")
-        st.divider()
-
-        # คำนวณและเรียง
+        # คำนวณ holding list พร้อม badge colors
         holding_list = []
-        for p in positions:
+        for i, p in enumerate(positions):
             t        = p["ticker"]
             cur      = prices.get(t, {})
             cur_px   = cur.get("price", p["entry_price"])
@@ -1825,57 +1804,105 @@ if st.session_state.get("show_portfolio"):
             pl_pct   = round(pl / cost * 100, 2) if cost else 0
             day_chg  = round((cur_px - prev_px) / prev_px * 100, 2) if prev_px else 0
             port_pct = round(value / summary["total_value"] * 100, 1) if summary["total_value"] else 0
+            bg, tc   = BADGE_COLORS[i % len(BADGE_COLORS)]
             holding_list.append({**p, "value": value, "cost": cost, "pl": pl,
                                   "pl_pct": pl_pct, "day_chg": day_chg,
-                                  "port_pct": port_pct, "cur_price": cur_px})
+                                  "port_pct": port_pct, "cur_price": cur_px,
+                                  "bg": bg, "tc": tc})
 
         holding_list.sort(key=lambda x: x["value"], reverse=True)
 
-        for h in holding_list:
-            pl_col   = "var(--color-text-success)" if h["pl"] >= 0 else "var(--color-text-danger)"
-            pl_sign  = "↑" if h["pl"] >= 0 else "↓"
-            day_col  = "var(--color-text-success)" if h["day_chg"] >= 0 else "var(--color-text-danger)"
-            pl_sign2 = "+" if h["pl"] >= 0 else ""
+        # ===== HEADER CARD (สไตล์ Dime) =====
+        pl_pos   = summary["unrealized_pl"] >= 0
+        day_pos  = summary["day_change"] >= 0
+        pl_sign  = "↑" if pl_pos  else "↓"
+        day_sign = "↑" if day_pos else "↓"
+        pl_css   = "var(--color-text-success)" if pl_pos  else "var(--color-text-danger)"
+        day_css  = "var(--color-text-success)" if day_pos else "var(--color-text-danger)"
 
-            c1, c2, c3 = st.columns([3, 3, 3])
-            with c1:
-                st.markdown(f"""
-<div style="display:flex;align-items:center;gap:10px;padding:8px 0;">
-  <div style="width:40px;height:40px;border-radius:8px;background:var(--color-background-info);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;color:var(--color-text-info);flex-shrink:0;">{h['ticker'][:4]}</div>
-  <div>
-    <div style="font-size:14px;font-weight:500;color:var(--color-text-primary);">{h['ticker']}</div>
-    <div style="font-size:11px;color:var(--color-text-tertiary);">{h['port_pct']}% · {h['shares']} หุ้น</div>
+        # แถบสีสัดส่วน portfolio
+        bar_segs = "".join([
+            f'<div style="flex:{h["port_pct"]};height:100%;background:{h["bg"]};'
+            f'border:1px solid {h["tc"]};border-radius:2px"></div>'
+            for h in holding_list
+        ])
+
+        st.markdown(f"""
+<div style="background:var(--color-background-secondary);border-radius:14px;padding:20px 22px;margin-bottom:20px;">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:2px;">
+    <div style="font-size:12px;color:var(--color-text-tertiary);">มูลค่าพอร์ตรวม</div>
+    <div style="font-size:11px;color:var(--color-text-tertiary);">1 USD = {rate:.2f} ฿</div>
   </div>
-</div>""", unsafe_allow_html=True)
-            with c2:
-                st.markdown(f"""
-<div style="padding:8px 0;">
-  <div style="font-size:15px;font-weight:500;color:var(--color-text-primary);">${h['value']:,.2f}</div>
-  <div style="font-size:11px;color:var(--color-text-tertiary);">เข้าที่ ${h['entry_price']:.2f} · ปัจจุบัน ${h['cur_price']:.2f}</div>
-</div>""", unsafe_allow_html=True)
-            with c3:
-                st.markdown(f"""
-<div style="padding:8px 0;text-align:right;">
-  <div style="font-size:15px;font-weight:500;color:{pl_col};">{pl_sign} {abs(h['pl_pct']):.2f}%</div>
-  <div style="font-size:11px;color:{pl_col};">({pl_sign2}${h['pl']:,.2f})</div>
-</div>""", unsafe_allow_html=True)
+  <div style="font-size:30px;font-weight:500;color:var(--color-text-primary);line-height:1.2;">${summary['total_value']:,.2f} USD</div>
+  <div style="font-size:13px;color:var(--color-text-secondary);margin-top:2px;">≈ {int(summary['total_value']*rate):,} บาท</div>
+  <div style="display:flex;gap:2px;height:6px;margin:14px 0 14px;border-radius:3px;overflow:hidden;">{bar_segs}</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0;">
+    <div style="padding-right:12px;">
+      <div style="font-size:11px;color:var(--color-text-tertiary);">เปลี่ยนวันนี้</div>
+      <div style="font-size:14px;font-weight:500;color:{day_css};">{day_sign}{abs(summary['day_change_pct']):.2f}%</div>
+    </div>
+    <div style="padding:0 12px;border-left:0.5px solid var(--color-border-tertiary);">
+      <div style="font-size:11px;color:var(--color-text-tertiary);">กำไร/ขาดทุน</div>
+      <div style="font-size:14px;font-weight:500;color:{pl_css};">{pl_sign}{abs(summary['unrealized_pct']):.2f}%</div>
+      <div style="font-size:11px;color:{pl_css};">{pl_sign}${abs(summary['unrealized_pl']):,.2f}</div>
+    </div>
+    <div style="padding:0 12px;border-left:0.5px solid var(--color-border-tertiary);">
+      <div style="font-size:11px;color:var(--color-text-tertiary);">ต้นทุน</div>
+      <div style="font-size:14px;font-weight:500;color:var(--color-text-primary);">${summary['total_cost']:,.2f}</div>
+    </div>
+    <div style="padding-left:12px;border-left:0.5px solid var(--color-border-tertiary);">
+      <div style="font-size:11px;color:var(--color-text-tertiary);">จำนวนหุ้น</div>
+      <div style="font-size:14px;font-weight:500;color:var(--color-text-primary);">{len(positions)} ตัว</div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-            btn1, btn2, btn3 = st.columns([2, 2, 1])
-            if btn1.button(f"Quick View {h['ticker']}", key=f"qv_{h['id']}"):
+        # ===== HOLDINGS LIST (สไตล์ Dime) =====
+        st.caption("HOLDINGS · เรียงตาม Holding Value")
+
+        for h in holding_list:
+            pl_css2  = "var(--color-text-success)" if h["pl"] >= 0 else "var(--color-text-danger)"
+            pl_arrow = "↑" if h["pl"] >= 0 else "↓"
+
+            # Card หลัก
+            st.markdown(f"""
+<div style="display:flex;align-items:center;gap:12px;padding:14px 0;border-bottom:0.5px solid var(--color-border-tertiary);">
+  <div style="width:44px;height:44px;border-radius:10px;background:{h['bg']};display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;color:{h['tc']};flex-shrink:0;">{h['ticker'][:4]}</div>
+  <div style="flex:1;min-width:0;">
+    <div style="font-size:14px;font-weight:500;color:var(--color-text-primary);">{h['ticker']}</div>
+    <div style="font-size:11px;color:var(--color-text-tertiary);">{h['port_pct']}% · {h['shares']} หุ้น · เข้า ${h['entry_price']:.2f}</div>
+  </div>
+  <div style="text-align:right;flex-shrink:0;">
+    <div style="font-size:15px;font-weight:500;color:var(--color-text-primary);">${h['value']:,.2f}</div>
+    <div style="font-size:11px;color:var(--color-text-tertiary);">≈ {int(h['value']*rate):,} ฿</div>
+    <div style="font-size:13px;font-weight:500;color:{pl_css2};">{pl_arrow} {abs(h['pl_pct']):.2f}% (${h['pl']:+,.2f})</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+            # ปุ่ม action
+            b1, b2, b3 = st.columns([3, 3, 1])
+            if b1.button(f"⚡ Quick View", key=f"qv_{h['id']}"):
                 st.session_state["show_portfolio"] = False
                 st.session_state["load_ticker"]    = h["ticker"]
                 st.rerun()
-            if btn2.button(f"Analyze {h['ticker']}", key=f"an_{h['id']}"):
+            if b2.button(f"🤖 Analyze", key=f"an_{h['id']}"):
                 st.session_state["show_portfolio"] = False
                 st.session_state["load_ticker"]    = h["ticker"]
                 st.rerun()
-            if btn3.button("ลบ", key=f"del_pos_{h['id']}"):
+            if b3.button("🗑", key=f"del_{h['id']}"):
                 portfolio_delete_position(h["id"])
                 st.rerun()
-            st.divider()
 
     else:
-        st.info("ยังไม่มีหุ้นใน portfolio — เพิ่มได้เลยด้านล่าง")
+        st.markdown("""
+<div style="text-align:center;padding:40px 20px;color:var(--color-text-tertiary);">
+  <div style="font-size:32px;margin-bottom:8px;">📊</div>
+  <div style="font-size:14px;">ยังไม่มีหุ้นใน portfolio</div>
+  <div style="font-size:12px;margin-top:4px;">เพิ่มหุ้นด้านล่างได้เลย</div>
+</div>
+""", unsafe_allow_html=True)
 
     # ===== ADD POSITION FORM =====
     st.subheader("เพิ่มหุ้น")
