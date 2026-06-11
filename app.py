@@ -538,13 +538,43 @@ BEARISH_WORDS = ["miss","probe","fine","investigation","lawsuit","loss",
 import re as _re
 from datetime import datetime as _dt, timedelta as _td
 
+# titles ที่เป็น page navigation ไม่ใช่ข่าว
+_NON_NEWS_TITLES = [
+    "stock info", "investor relations", "news -", "- news",
+    "stock price", "stock quote", "historical data", "price forecast",
+    "read more", "stock analysis -", "quote &", "price &",
+]
+
+def _is_news_article(title: str, content: str) -> bool:
+    """กรอง page ที่ไม่ใช่ข่าวจริงๆ ออก"""
+    title_lower = title.lower()
+    if any(bad in title_lower for bad in _NON_NEWS_TITLES):
+        return False
+    # content ที่เป็น table (มี | เยอะ) หรือ navigation
+    pipe_count = content.count("|")
+    if pipe_count > 5:
+        return False
+    return True
+
 def _clean_content(text: str) -> str:
-    """ตัด markdown, image refs, URL ออกจาก content"""
+    """ตัด noise ทุกประเภทออก"""
+    # ลบ image markdown
     text = _re.sub(r'!\[.*?\]\(.*?\)', '', text)
+    # แปลง [text](url) → text
     text = _re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-    text = _re.sub(r'https?://\S+', '', text)           # ลบ URL ดิบ
-    text = _re.sub(r'\s+', ' ', text).strip()           # ลบ whitespace ซ้ำ
-    return text[:200]
+    # ลบ URL
+    text = _re.sub(r'https?://\S+', '', text)
+    # ลบ (BUSINESS WIRE)--, (PR NEWSWIRE)-- prefix
+    text = _re.sub(r'\([A-Z ]+\)--', '', text)
+    # ลบ NYSE: IONQ, XNYS:IONQ type
+    text = _re.sub(r'[A-Z]+:[A-Z]+,?\s?', '', text)
+    # ลบ table rows (| data | data |)
+    text = _re.sub(r'\|[^\n]+\|', '', text)
+    # ลบ "Read More" navigation
+    text = _re.sub(r'Read More\s*', '', text, flags=_re.IGNORECASE)
+    # ลบ whitespace ซ้ำ
+    text = _re.sub(r'\s+', ' ', text).strip()
+    return text[:220]
 
 def _is_recent(pub_date: str, max_days: int = 30) -> bool:
     """เช็กว่าข่าวอายุไม่เกิน max_days"""
@@ -567,13 +597,15 @@ def classify_sentiment(text: str) -> tuple[str, str]:
     return "Neutral", "var(--color-text-secondary)"
 
 def _format_article(a: dict, ticker: str = "") -> dict | None:
-    """แปลง raw article → cleaned dict, คืน None ถ้าข่าวเก่าเกิน"""
-    pub = a.get("published_date", "")[:10]
+    """แปลง raw article → cleaned dict, คืน None ถ้าข่าวเก่าหรือไม่ใช่ข่าวจริง"""
+    pub     = a.get("published_date", "")[:10]
     if not _is_recent(pub, max_days=30):
         return None
     title   = _clean_content(a.get("title", "N/A"))
     content = _clean_content(a.get("content", ""))
-    if not title or title == "N/A":
+    if not title or title == "N/A" or len(title) < 10:
+        return None
+    if not _is_news_article(title, content):
         return None
     sentiment, color = classify_sentiment(title + " " + content)
     return {
@@ -596,9 +628,11 @@ def get_portfolio_news(tickers: tuple, max_per: int = 7) -> list:
                 from tavily import TavilyClient
                 client   = TavilyClient(api_key=tavily_key)
                 response = client.search(
-                    query=f"{t} stock news 2025 2026",
-                    search_depth="advanced",
+                    query=f"{t} stock news",
+                    search_depth="basic",
+                    topic="news",
                     max_results=max_per,
+                    days=30,
                 )
                 for a in response.get("results", []):
                     item = _format_article(a, t)
@@ -626,7 +660,13 @@ def search_news_manual(query: str, max_results: int = 10) -> list:
     try:
         from tavily import TavilyClient
         client   = TavilyClient(api_key=tavily_key)
-        response = client.search(query=query, search_depth="advanced", max_results=max_results)
+        response = client.search(
+                query=query,
+                search_depth="basic",
+                topic="news",
+                max_results=max_results,
+                days=60,
+            )
         results  = []
         for a in response.get("results", []):
             item = _format_article(a)
