@@ -1353,6 +1353,46 @@ def get_options_data(ticker: str) -> dict | None:
         return None
 
 
+
+# ===== TICKER DATA HUB =====
+@st.cache_data(ttl=1800)
+def get_ticker_hub(ticker: str) -> dict:
+    """ดึงข้อมูลจาก yfinance ครั้งเดียว share ให้ทุกฟังก์ชัน ลด rate limit"""
+    import time as _t
+    stock = yf.Ticker(ticker)
+    hub   = {"info":{}, "financials":None, "cashflow":None,
+             "balance_sheet":None, "quarterly":None,
+             "earnings_history":None, "options_exp":None}
+    try:
+        hub["info"] = stock.info or {}; _t.sleep(0.15)
+    except: pass
+    try:
+        hub["financials"] = stock.financials; _t.sleep(0.1)
+    except: pass
+    try:
+        hub["cashflow"] = stock.cashflow; _t.sleep(0.1)
+    except: pass
+    try:
+        hub["balance_sheet"] = stock.balance_sheet; _t.sleep(0.1)
+    except: pass
+    try:
+        hub["quarterly"] = stock.quarterly_financials; _t.sleep(0.1)
+    except: pass
+    try:
+        hub["earnings_history"] = stock.earnings_history; _t.sleep(0.1)
+    except: pass
+    try:
+        hub["options_exp"] = stock.options
+    except: pass
+    # Fallback sector/industry
+    if not hub["info"].get("sector"):
+        try:
+            fi = stock.fast_info
+            hub["info"]["sector"]   = getattr(fi,"sector","N/A") or "N/A"
+            hub["info"]["industry"] = getattr(fi,"industry","N/A") or "N/A"
+        except: pass
+    return hub
+
 # ===== VALUATION CONTEXT =====
 @st.cache_data(ttl=1800)
 def get_valuation_context(ticker: str) -> str:
