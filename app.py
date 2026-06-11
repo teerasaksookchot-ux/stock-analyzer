@@ -355,7 +355,8 @@ def _sb_headers() -> dict:
     }
 
 def _sb_url(table: str) -> str:
-    return st.secrets.get("SUPABASE_URL", "") + f"/rest/v1/{table}"
+    base = st.secrets.get("SUPABASE_URL", "").rstrip("/")
+    return f"{base}/rest/v1/{table}"
 
 def portfolio_add_position(ticker, company_name, shares, entry_price, entry_date, notes=""):
     try:
