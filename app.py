@@ -854,13 +854,40 @@ Shares Short: {insider_data['shares_short']:,}
 
 def get_company_info(ticker):
     try:
-        info = yf.Ticker(ticker).info
-        if not info.get("currentPrice") and not info.get("regularMarketPrice"):
+        stock = yf.Ticker(ticker)
+        info  = stock.info
+
+        # ลอง 3 วิธีดึงราคา
+        price = (info.get("currentPrice") or
+                 info.get("regularMarketPrice") or 0)
+
+        if not price:
+            try:
+                price = float(stock.fast_info.last_price or 0)
+            except:
+                pass
+
+        if not price:
+            try:
+                h = stock.history(period="5d")
+                closes = h["Close"].dropna()
+                if not closes.empty:
+                    price = float(closes.iloc[-1])
+            except:
+                pass
+
+        if not price:
             return None
+
+        # ดึง name — fallback ถ้า shortName ไม่มี
+        name = (info.get("shortName") or
+                info.get("longName") or
+                info.get("displayName") or ticker)
+
         return {
             "ticker":       ticker,
-            "name":         info.get("shortName", "N/A"),
-            "price":        info.get("currentPrice") or info.get("regularMarketPrice", 0),
+            "name":         name,
+            "price":        round(price, 2),
             "market_cap_b": round(info.get("marketCap", 0) / 1e9, 1),
             "sector":       info.get("sector", "N/A"),
             "industry":     info.get("industry", "N/A"),
