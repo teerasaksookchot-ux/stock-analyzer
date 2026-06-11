@@ -854,35 +854,61 @@ Shares Short: {insider_data['shares_short']:,}
 
 def get_company_info(ticker):
     try:
-        stock = yf.Ticker(ticker)
-        info  = stock.info
+        price = 0
+        info  = {}
 
-        # ลอง 3 วิธีดึงราคา
-        price = (info.get("currentPrice") or
-                 info.get("regularMarketPrice") or 0)
+        # วิธีที่ 1: yf.download — reliable ที่สุด ใช้ API endpoint ต่างกัน
+        try:
+            d = yf.download(
+                ticker, period="5d",
+                progress=False, auto_adjust=True,
+                actions=False,
+            )
+            if not d.empty:
+                closes = d["Close"].dropna()
+                if not closes.empty:
+                    price = float(closes.iloc[-1])
+        except:
+            pass
 
+        # วิธีที่ 2: fast_info
         if not price:
             try:
-                price = float(stock.fast_info.last_price or 0)
+                price = float(yf.Ticker(ticker).fast_info.last_price or 0)
             except:
                 pass
 
+        # วิธีที่ 3: history
         if not price:
             try:
-                h = stock.history(period="5d")
+                h = yf.Ticker(ticker).history(period="5d")
                 closes = h["Close"].dropna()
                 if not closes.empty:
                     price = float(closes.iloc[-1])
             except:
                 pass
 
+        # วิธีที่ 4: .info (ช้าที่สุด แต่ fallback สุดท้าย)
+        if not price:
+            try:
+                info  = yf.Ticker(ticker).info
+                price = float(info.get("currentPrice") or
+                              info.get("regularMarketPrice") or 0)
+            except:
+                pass
+
         if not price:
             return None
 
-        # ดึง name — fallback ถ้า shortName ไม่มี
+        # ดึง metadata (best effort — ไม่ fail ถ้าไม่ได้)
+        if not info:
+            try:
+                info = yf.Ticker(ticker).info
+            except:
+                info = {}
+
         name = (info.get("shortName") or
-                info.get("longName") or
-                info.get("displayName") or ticker)
+                info.get("longName") or ticker)
 
         return {
             "ticker":       ticker,
@@ -891,7 +917,7 @@ def get_company_info(ticker):
             "market_cap_b": round(info.get("marketCap", 0) / 1e9, 1),
             "sector":       info.get("sector", "N/A"),
             "industry":     info.get("industry", "N/A"),
-            "summary":      info.get("longBusinessSummary", "N/A")[:500],
+            "summary":      (info.get("longBusinessSummary") or "N/A")[:500],
         }
     except:
         return None
