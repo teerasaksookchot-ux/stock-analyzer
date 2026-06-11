@@ -8,6 +8,7 @@ import pandas as pd
 import io
 from datetime import datetime, timedelta
 from scipy.signal import argrelextrema
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="Stock Analyzer", layout="wide")
 client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
@@ -633,7 +634,7 @@ def _format_article(a: dict, ticker: str = "") -> dict | None:
         "sent_color": color,
     }
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=900)
 def get_portfolio_news(tickers: tuple, max_per: int = 7) -> list:
     results    = []
     tavily_key = st.secrets.get("TAVILY_API_KEY", "")
@@ -2106,6 +2107,12 @@ if st.session_state.get("show_portfolio"):
         st.subheader("📰 ข่าวพอร์ต")
         all_tickers = tuple(set(p["ticker"] for p in positions))
 
+        # Refresh button
+        ref_col, _ = st.columns([1, 5])
+        if ref_col.button("🔄 โหลดข่าวใหม่", key="refresh_news"):
+            st.cache_data.clear()
+            st.rerun()
+
         # Filter buttons
         filter_cols = st.columns(len(all_tickers) + 1)
         if filter_cols[0].button("All", type="primary" if st.session_state["news_filter"]=="All" else "secondary", use_container_width=True):
@@ -2368,24 +2375,53 @@ if btn_analyze and ticker_input:
             dcf_val           = calc_simple_dcf(ticker_input)
             earnings_tx       = get_earnings_transcript(ticker_input)
 
-        with st.spinner("Financial Agent (CoT + SEC + DCF + Earnings)..."):
-            fin_result  = financial_agent(
+        # ===== PARALLEL AGENTS (รัน 6 Agents พร้อมกัน) =====
+        agent_tasks = {
+            "financial":   lambda: financial_agent(
                 company, financials, quarterly, analyst,
                 sec_data, valuation_ctx, mgmt_cred, dcf_val, earnings_tx
-            )
-        with st.spinner("Macro Agent (CoT + Full FRED)..."):
-            mac_result  = macro_agent(company, macro, yield_curve)
-        with st.spinner("News Agent (CoT + Tavily)..."):
-            news_result = news_agent(company, news)
-        with st.spinner("Technical Agent (CoT + Options + RS)..."):
-            tech_result = technical_agent(
+            ),
+            "macro":       lambda: macro_agent(company, macro, yield_curve),
+            "news":        lambda: news_agent(company, news),
+            "technical":   lambda: technical_agent(
                 company, price_summary, indicators,
                 options_summary, relative_strength
-            )
-        with st.spinner("Geopolitical Agent (CoT + War/Policy)..."):
-            geo_result     = geopolitical_agent(company, geo_indicators, news)
-        with st.spinner("Insider Agent (+ Short Interest/Institutional)..."):
-            insider_result = insider_agent(company, insider_data)
+            ),
+            "geopolitical": lambda: geopolitical_agent(company, geo_indicators, news),
+            "insider":     lambda: insider_agent(company, insider_data),
+        }
+
+        results      = {}
+        agent_status = {k: "⏳" for k in agent_tasks}
+        status_ph    = st.empty()
+
+        def update_status():
+            lines = [f"{v} {k.capitalize()} Agent" for k, v in agent_status.items()]
+            status_ph.caption("กำลังวิเคราะห์พร้อมกัน: " + " · ".join(lines))
+
+        update_status()
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {pool.submit(fn): name for name, fn in agent_tasks.items()}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    results[name]     = future.result()
+                    agent_status[name] = "✅"
+                except Exception as e:
+                    results[name]     = f"Agent error: {e}"
+                    agent_status[name] = "❌"
+                update_status()
+
+        status_ph.empty()
+
+        fin_result     = results.get("financial",    "")
+        mac_result     = results.get("macro",        "")
+        news_result    = results.get("news",         "")
+        tech_result    = results.get("technical",    "")
+        geo_result     = results.get("geopolitical", "")
+        insider_result = results.get("insider",      "")
+
         with st.spinner("Orchestrator (Self-Reflection 2 รอบ)..."):
             final = orchestrator_agent(
                 company, fin_result, mac_result, geo_result,
