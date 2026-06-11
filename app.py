@@ -450,18 +450,43 @@ BADGE_COLORS = [
 
 @st.cache_data(ttl=300)
 def portfolio_get_current_prices(tickers: tuple) -> dict:
-    """ดึงราคาปัจจุบันของหุ้นทั้งหมดใน portfolio"""
+    """ดึงราคาปัจจุบันของหุ้นทั้งหมดใน portfolio — ใช้ history เพื่อความ reliable"""
     prices = {}
     for t in tickers:
         try:
-            info  = yf.Ticker(t).info
-            price = info.get("currentPrice") or info.get("regularMarketPrice", 0)
-            prev  = info.get("previousClose", price)
+            stock  = yf.Ticker(t)
+            price  = prev = 0
+
+            # 1) ลอง fast_info ก่อน (เร็วที่สุด)
+            try:
+                fi    = stock.fast_info
+                price = float(fi.last_price or 0)
+                prev  = float(fi.previous_close or price)
+            except:
+                pass
+
+            # 2) fallback → history 5 วัน (reliable ที่สุด)
+            if not price:
+                hist   = stock.history(period="5d")
+                closes = hist["Close"].dropna()
+                if len(closes) >= 2:
+                    price = float(closes.iloc[-1])
+                    prev  = float(closes.iloc[-2])
+                elif len(closes) == 1:
+                    price = float(closes.iloc[-1])
+                    prev  = price
+
+            # 3) fallback → info (ช้าที่สุด)
+            if not price:
+                info  = stock.info
+                price = float(info.get("currentPrice") or info.get("regularMarketPrice") or 0)
+                prev  = float(info.get("previousClose") or price)
+
             prices[t] = {
-                "price":    round(price, 2),
-                "prev":     round(prev, 2),
-                "day_chg":  round((price - prev) / prev * 100, 2) if prev else 0,
-                "name":     info.get("shortName", t)[:20],
+                "price":   round(price, 2),
+                "prev":    round(prev, 2),
+                "day_chg": round((price - prev) / prev * 100, 2) if prev else 0,
+                "name":    t,
             }
         except:
             prices[t] = {"price": 0, "prev": 0, "day_chg": 0, "name": t}
