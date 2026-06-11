@@ -139,6 +139,10 @@ if "db_history_loaded" not in st.session_state:
     st.session_state["db_history_loaded"] = False
 if "show_portfolio" not in st.session_state:
     st.session_state["show_portfolio"] = False
+if "news_filter" not in st.session_state:
+    st.session_state["news_filter"] = "All"
+if "news_search_query" not in st.session_state:
+    st.session_state["news_search_query"] = ""
 
 # ===== PARSE UPLOADED FILE =====
 def parse_analysis_file(text: str) -> dict | None:
@@ -519,6 +523,101 @@ def portfolio_calc_summary(positions: list, prices: dict) -> dict:
         "day_change":     round(total_day_chg, 2),
         "day_change_pct": day_chg_pct,
     }
+
+
+# ===== PORTFOLIO NEWS =====
+BULLISH_WORDS = ["beat", "beats", "record", "contract", "partnership", "approved",
+                  "growth", "profit", "surge", "rally", "upgrade", "buy", "strong",
+                  "win", "award", "launch", "breakthrough", "revenue", "earnings beat"]
+BEARISH_WORDS = ["miss", "probe", "fine", "investigation", "lawsuit", "loss",
+                  "downgrade", "sell", "weak", "decline", "cut", "layoff", "fail",
+                  "warning", "recall", "fraud", "violation", "penalty", "miss"]
+
+def classify_sentiment(text: str) -> tuple[str, str]:
+    """คืน (label, color_css)"""
+    text_lower = text.lower()
+    bull = sum(1 for w in BULLISH_WORDS if w in text_lower)
+    bear = sum(1 for w in BEARISH_WORDS if w in text_lower)
+    if bull > bear:
+        return "Bullish", "var(--color-text-success)"
+    elif bear > bull:
+        return "Bearish", "var(--color-text-danger)"
+    return "Neutral", "var(--color-text-secondary)"
+
+@st.cache_data(ttl=1800)
+def get_portfolio_news(tickers: tuple, max_per: int = 5) -> list:
+    """ดึงข่าวอัตโนมัติทุกหุ้นใน portfolio"""
+    results = []
+    tavily_key = st.secrets.get("TAVILY_API_KEY", "")
+
+    for t in tickers:
+        try:
+            if tavily_key:
+                from tavily import TavilyClient
+                client   = TavilyClient(api_key=tavily_key)
+                response = client.search(
+                    query=f"{t} stock news",
+                    search_depth="basic",
+                    max_results=max_per,
+                )
+                for a in response.get("results", []):
+                    sentiment, color = classify_sentiment(
+                        a.get("title","") + " " + a.get("content","")
+                    )
+                    results.append({
+                        "ticker":    t,
+                        "title":     a.get("title", "N/A"),
+                        "content":   a.get("content", "")[:200],
+                        "url":       a.get("url", ""),
+                        "published": a.get("published_date", "")[:10],
+                        "sentiment": sentiment,
+                        "sent_color": color,
+                    })
+            else:
+                # fallback → yfinance news
+                news = yf.Ticker(t).news or []
+                for n in news[:max_per]:
+                    title = n.get("content", {}).get("title", "N/A")
+                    sentiment, color = classify_sentiment(title)
+                    results.append({
+                        "ticker":    t,
+                        "title":     title,
+                        "content":   "",
+                        "url":       n.get("content", {}).get("canonicalUrl", {}).get("url", ""),
+                        "published": "",
+                        "sentiment": sentiment,
+                        "sent_color": color,
+                    })
+        except:
+            pass
+    return results
+
+@st.cache_data(ttl=600)
+def search_news_manual(query: str, max_results: int = 10) -> list:
+    """Manual search ด้วย Tavily"""
+    tavily_key = st.secrets.get("TAVILY_API_KEY", "")
+    if not tavily_key:
+        return []
+    try:
+        from tavily import TavilyClient
+        client   = TavilyClient(api_key=tavily_key)
+        response = client.search(query=query, search_depth="basic", max_results=max_results)
+        results  = []
+        for a in response.get("results", []):
+            sentiment, color = classify_sentiment(
+                a.get("title","") + " " + a.get("content","")
+            )
+            results.append({
+                "title":     a.get("title", "N/A"),
+                "content":   a.get("content","")[:200],
+                "url":       a.get("url",""),
+                "published": a.get("published_date","")[:10],
+                "sentiment": sentiment,
+                "sent_color": color,
+            })
+        return results
+    except:
+        return []
 
 
 # ===== ALERT SYSTEM =====
@@ -1928,6 +2027,86 @@ if st.session_state.get("show_portfolio"):
   <div style="font-size:12px;margin-top:4px;">เพิ่มหุ้นด้านล่างได้เลย</div>
 </div>
 """, unsafe_allow_html=True)
+
+    # ===== NEWS SECTION =====
+    if positions:
+        st.divider()
+        st.subheader("📰 ข่าวพอร์ต")
+        all_tickers = tuple(set(p["ticker"] for p in positions))
+
+        # Filter buttons
+        filter_cols = st.columns(len(all_tickers) + 1)
+        if filter_cols[0].button("All", type="primary" if st.session_state["news_filter"]=="All" else "secondary", use_container_width=True):
+            st.session_state["news_filter"] = "All"
+            st.rerun()
+        for i, t in enumerate(all_tickers):
+            btn_type = "primary" if st.session_state["news_filter"] == t else "secondary"
+            if filter_cols[i+1].button(t, type=btn_type, use_container_width=True):
+                st.session_state["news_filter"] = t
+                st.rerun()
+
+        # Auto Feed
+        with st.spinner("กำลังดึงข่าวล่าสุด..."):
+            all_news = get_portfolio_news(all_tickers, max_per=5)
+
+        filtered = (all_news if st.session_state["news_filter"] == "All"
+                    else [n for n in all_news if n["ticker"] == st.session_state["news_filter"]])
+
+        if filtered:
+            for n in filtered:
+                bg, tc = next(
+                    (BADGE_COLORS[i % len(BADGE_COLORS)] for i, p in enumerate(positions) if p["ticker"] == n.get("ticker","")),
+                    ("#E6F1FB","#185FA5")
+                )
+                pub = f"· {n['published']}" if n.get("published") else ""
+                st.markdown(f"""
+<div style="display:flex;gap:12px;padding:12px 0;border-bottom:0.5px solid var(--color-border-tertiary);align-items:flex-start;">
+  <div style="width:36px;height:36px;border-radius:8px;background:{bg};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:500;color:{tc};flex-shrink:0;">{n.get('ticker','')[:4]}</div>
+  <div style="flex:1;min-width:0;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">
+      <span style="font-size:11px;font-weight:500;color:{n['sent_color']};">{n['sentiment']}</span>
+      <span style="font-size:11px;color:var(--color-text-tertiary);">{pub}</span>
+    </div>
+    <div style="font-size:13px;font-weight:500;color:var(--color-text-primary);line-height:1.4;">{n['title']}</div>
+    <div style="font-size:12px;color:var(--color-text-secondary);margin-top:3px;">{n.get('content','')}</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+                if n.get("url"):
+                    st.link_button("อ่านต่อ →", n["url"])
+        else:
+            st.caption("ไม่พบข่าว")
+
+        # Manual Search
+        st.divider()
+        st.subheader("🔍 ค้นข่าวเพิ่มเติม")
+        sc1, sc2 = st.columns([4, 1])
+        search_q = sc1.text_input("", placeholder="เช่น quantum computing tariff, IONQ government contract", label_visibility="collapsed")
+        do_search = sc2.button("ค้นหา", use_container_width=True)
+
+        if do_search and search_q:
+            st.session_state["news_search_query"] = search_q
+        if st.session_state.get("news_search_query"):
+            with st.spinner("กำลังค้นหา..."):
+                manual_results = search_news_manual(st.session_state["news_search_query"])
+            if manual_results:
+                for r in manual_results:
+                    st.markdown(f"""
+<div style="padding:10px 0;border-bottom:0.5px solid var(--color-border-tertiary);">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;">
+    <span style="font-size:11px;font-weight:500;color:{r['sent_color']};">{r['sentiment']}</span>
+    <span style="font-size:11px;color:var(--color-text-tertiary);">{r.get('published','')}</span>
+  </div>
+  <div style="font-size:13px;font-weight:500;color:var(--color-text-primary);">{r['title']}</div>
+  <div style="font-size:12px;color:var(--color-text-secondary);margin-top:2px;">{r.get('content','')}</div>
+</div>
+""", unsafe_allow_html=True)
+                    if r.get("url"):
+                        st.link_button("อ่านต่อ →", r["url"])
+            else:
+                st.info("ไม่พบผลลัพธ์ หรือยังไม่ได้ตั้งค่า Tavily API Key")
+
+        st.divider()
 
     # ===== ADD POSITION FORM =====
     st.subheader("เพิ่มหุ้น")
