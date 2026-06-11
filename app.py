@@ -693,6 +693,49 @@ def search_news_manual(query: str, max_results: int = 10) -> list:
         return []
 
 
+# ===== AGENT CHECKPOINTS =====
+def save_checkpoint(ticker: str, agent: str, result: str):
+    try:
+        r = requests.post(
+            _sb_url("agent_checkpoints"),
+            headers=_sb_headers(),
+            json={"ticker": ticker, "agent": agent, "result": result},
+            timeout=8,
+        )
+    except:
+        pass
+
+def load_checkpoints(ticker: str) -> dict:
+    try:
+        r = requests.get(
+            _sb_url("agent_checkpoints"),
+            headers=_sb_headers(),
+            params={"ticker": f"eq.{ticker}", "order": "created_at.desc"},
+            timeout=8,
+        )
+        if r.status_code == 200:
+            rows = r.json()
+            latest = {}
+            for row in rows:
+                if row["agent"] not in latest:
+                    latest[row["agent"]] = row["result"]
+            return latest
+        return {}
+    except:
+        return {}
+
+def clear_checkpoints(ticker: str):
+    try:
+        requests.delete(
+            _sb_url("agent_checkpoints"),
+            headers=_sb_headers(),
+            params={"ticker": f"eq.{ticker}"},
+            timeout=8,
+        )
+    except:
+        pass
+
+
 # ===== ALERT SYSTEM =====
 
 def send_telegram(message: str) -> bool:
@@ -1437,6 +1480,93 @@ def get_earnings_transcript(ticker: str) -> str:
         return f"8-K: ดึงไม่ได้ ({e})"
 
 
+# ===== ECONOMIC CALENDAR =====
+@st.cache_data(ttl=86400)
+def get_economic_calendar() -> dict:
+    """FOMC dates + upcoming macro events"""
+    fomc_2026 = ["2026-06-18","2026-07-30","2026-09-17","2026-11-05","2026-12-17"]
+    today     = datetime.now().date()
+    upcoming  = [d for d in fomc_2026 if d >= str(today)]
+    next_fomc = upcoming[0] if upcoming else "N/A"
+    days_away = (datetime.strptime(next_fomc,"%Y-%m-%d").date()-today).days if next_fomc!="N/A" else 0
+    warning   = f"⚠️ FOMC ใน {days_away} วัน — ระวัง volatility" if days_away <= 7 else ""
+    # CPI release (approx 2nd week of each month)
+    next_month = (today.replace(day=1) + _td(days=32)).replace(day=12)
+    return {
+        "next_fomc":    next_fomc,
+        "days_to_fomc": days_away,
+        "fomc_warning": warning,
+        "next_cpi_est": str(next_month),
+        "summary":      f"FOMC ถัดไป: {next_fomc} ({days_away} วัน) | CPI est.: {next_month}"
+    }
+
+# ===== SECTOR ROTATION =====
+@st.cache_data(ttl=3600)
+def get_sector_rotation() -> str:
+    """เปรียบเทียบ performance ทุก sector 3 เดือน"""
+    etfs = {
+        "Technology":"XLK","Healthcare":"XLV","Financials":"XLF",
+        "Energy":"XLE","Consumer Disc":"XLY","Industrials":"XLI",
+        "Utilities":"XLU","Materials":"XLB","Real Estate":"XLRE",
+        "Consumer Staples":"XLP","Communication":"XLC",
+    }
+    results = {}
+    for sector, etf in etfs.items():
+        try:
+            h = yf.Ticker(etf).history(period="3mo")
+            closes = h["Close"].dropna()
+            if len(closes) >= 2:
+                ret = round((closes.iloc[-1]/closes.iloc[0]-1)*100,1)
+                results[sector] = ret
+        except:
+            pass
+    if not results:
+        return "ไม่สามารถดึงข้อมูล sector rotation"
+    sorted_r  = sorted(results.items(), key=lambda x:x[1], reverse=True)
+    top3      = sorted_r[:3]
+    bot3      = sorted_r[-3:]
+    lines     = ["=== Sector Rotation (3M) ==="]
+    lines    += [f"  ↑ {s}: +{v}%" for s,v in top3]
+    lines    += [f"  ↓ {s}: {v}%" for s,v in bot3]
+    return "\n".join(lines)
+
+# ===== DCF 3 SCENARIOS =====
+@st.cache_data(ttl=86400)
+def calculate_dcf_scenarios(ticker: str) -> str:
+    """DCF แบบ Bull/Base/Bear scenarios"""
+    try:
+        stock  = yf.Ticker(ticker)
+        info   = stock.info
+        cf     = stock.cashflow
+        if cf is None or "Free Cash Flow" not in cf.index:
+            return "DCF: ไม่มีข้อมูล FCF"
+        fcf_vals = cf.loc["Free Cash Flow"].dropna()
+        if fcf_vals.iloc[0] <= 0:
+            return "DCF: FCF ติดลบ ไม่คำนวณ DCF"
+        latest_fcf = fcf_vals.iloc[0]
+        shares     = info.get("sharesOutstanding",1) or 1
+        cur_price  = info.get("currentPrice") or info.get("regularMarketPrice",0)
+        scenarios  = {
+            "Bear": {"growth":-0.05,"wacc":0.12,"terminal":0.02},
+            "Base": {"growth": 0.10,"wacc":0.10,"terminal":0.03},
+            "Bull": {"growth": 0.25,"wacc":0.08,"terminal":0.04},
+        }
+        lines = ["=== DCF 3 Scenarios ==="]
+        for name, p in scenarios.items():
+            pv = 0; fcf = latest_fcf
+            for y in range(1,11):
+                fcf *= (1+p["growth"]); pv += fcf/(1+p["wacc"])**y
+            terminal = fcf*(1+p["terminal"])/(p["wacc"]-p["terminal"])
+            pv += terminal/(1+p["wacc"])**10
+            iv  = round(pv/shares,2)
+            margin = round((iv-cur_price)/cur_price*100,1) if cur_price else 0
+            emoji = "🟢" if margin>20 else "🔴" if margin<-10 else "🟡"
+            lines.append(f"  {emoji} {name}: ${iv:.2f} ({margin:+.1f}% vs ราคา)")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"DCF Scenarios: ไม่ได้ ({e})"
+
+
 # ===== CHART CALCULATIONS =====
 
 def calc_bollinger(hist, window=20, k=2):
@@ -1782,6 +1912,131 @@ def technical_agent(company, price_summary, indicators,
 
 ตอบเป็นภาษาไทย อ้างราคาจริงทุกจุด""", 1000)
 
+def build_orchestrator_prompt(company, fin, mac, geo, insider, news, tech,
+                               eco_cal="", sector_rot="", dcf_scenarios="",
+                               conditional_summaries="") -> str:
+    """สร้าง prompt สำหรับ Orchestrator"""
+    extra = ""
+    if eco_cal:
+        extra += f"\n=== Economic Calendar ===\n{eco_cal}"
+    if sector_rot:
+        extra += f"\n=== Sector Rotation ===\n{sector_rot}"
+    if dcf_scenarios:
+        extra += f"\n=== DCF 3 Scenarios ===\n{dcf_scenarios}"
+    if conditional_summaries:
+        extra += f"\n=== Special Analysis (Conditional Agents) ===\n{conditional_summaries}"
+
+    return f"""คุณเป็น Chief Investment Officer
+รวมผลจากทีมผู้เชี่ยวชาญและสรุปภาพรวมการลงทุน
+
+หุ้น: {company['ticker']} ({company['name']})
+ราคา: ${company['price']:.2f} | Market Cap: ${company['market_cap_b']:.1f}B
+{extra}
+
+[Financial Analyst]: {fin}
+[Macro Economist]: {mac}
+[Geopolitical Analyst]: {geo}
+[Insider & Market Structure]: {insider}
+[News Analyst]: {news}
+[Technical Analyst]: {tech}
+
+คิดทีละขั้น:
+
+ขั้น 1 — Bull Case (อ้างหลักฐานจาก agents)
+ขั้น 2 — Bear Case (อ้างหลักฐานจาก agents)
+ขั้น 3 — จุดเข้าซื้อ: Zone A (Aggressive), Zone B (Optimal), Zone C (Conservative)
+ขั้น 4 — Stop Loss และ Target 1, Target 2
+ขั้น 5 — สรุป: ความเสี่ยง, กลยุทธ์, Confidence
+
+ตอบเป็นภาษาไทย ละเอียด มีตัวเลขชัดเจน"""
+
+def stream_orchestrator(prompt: str, placeholder):
+    """Streaming version ของ Orchestrator — แสดง token by token"""
+    full_text = ""
+    try:
+        with client.messages.stream(
+            model="claude-sonnet-4-6",
+            max_tokens=3500,
+            messages=[{"role": "user", "content": prompt}]
+        ) as stream:
+            for text in stream.text_stream:
+                full_text += text
+                placeholder.markdown(full_text + "▌")
+        placeholder.markdown(full_text)
+    except Exception as e:
+        full_text = run_agent(prompt, 3500)
+        placeholder.markdown(full_text)
+    return full_text
+
+def orchestrator_agent_with_tools(company, fin, mac, geo, insider, news, tech,
+                                   eco_cal="", sector_rot="", dcf_scenarios="",
+                                   conditional_summaries="") -> str:
+    """Orchestrator พร้อม Tool Calling สำหรับ follow-up queries"""
+    tools = [
+        {
+            "name": "search_recent_news",
+            "description": "ค้นหาข่าวล่าสุดเพิ่มเติมเมื่อต้องการข้อมูลเพิ่ม",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "คำค้นหาข่าว"}
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "get_economic_calendar",
+            "description": "ดึงข้อมูล upcoming macro events เช่น FOMC, CPI",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    ]
+
+    prompt   = build_orchestrator_prompt(company, fin, mac, geo, insider, news, tech,
+                                          eco_cal, sector_rot, dcf_scenarios,
+                                          conditional_summaries)
+    messages = [{"role": "user", "content": prompt}]
+    max_tool_loops = 3
+
+    for _ in range(max_tool_loops):
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=3500,
+            tools=tools,
+            messages=messages,
+        )
+        if response.stop_reason != "tool_use":
+            break
+
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                if block.name == "search_recent_news":
+                    result = search_news_manual(block.input.get("query",""))
+                    result_text = "\n".join([r.get("title","") for r in result[:5]])
+                elif block.name == "get_economic_calendar":
+                    cal = get_economic_calendar()
+                    result_text = cal.get("summary","")
+                else:
+                    result_text = "ไม่พบ tool"
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_text,
+                })
+
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+
+    # คืน text สุดท้าย
+    for block in response.content:
+        if hasattr(block, "text"):
+            return block.text
+    return "Orchestrator error"
+
 def orchestrator_agent(company, fin, mac, geo, insider, news, tech):
     """CIO Orchestrator แบบ Self-Reflection 2 รอบ"""
 
@@ -1913,6 +2168,131 @@ Sector: {company['sector']} | Industry: {company['industry']}
 5. สรุประดับความเสี่ยงภูมิรัฐศาสตร์ (สูง/กลาง/ต่ำ) พร้อมผลกระทบต่อราคาหุ้นและกลยุทธ์รับมือ
 
 ตอบเป็นภาษาไทย ละเอียด มีเหตุผลชัดเจน""", 1000)
+
+
+# ===== CONDITIONAL ROUTING =====
+def check_conditional_triggers(results: dict, indicators_raw,
+                                insider_data: dict, macro_str: str,
+                                yield_curve: str) -> list:
+    """ตรวจ conditions แล้วคืน list ของ agents ที่ต้องรัน"""
+    triggers = []
+
+    # FCF ติดลบ → Distressed
+    fin = results.get("financial","").lower()
+    if "fcf ติดลบ" in fin or "cash runway" in fin or "burn rate" in fin:
+        triggers.append("distressed")
+
+    # Short Interest > 20% → Squeeze Risk
+    if insider_data:
+        si = insider_data.get("short_pct_float", 0) or 0
+        if si >= 20:
+            triggers.append("squeeze")
+
+    # Yield curve inverted → Recession Risk
+    if "inverted" in yield_curve.lower() or "ระวัง recession" in yield_curve:
+        triggers.append("recession")
+
+    # RSI < 25 → Oversold
+    tech = results.get("technical","").lower()
+    if "rsi" in tech:
+        import re as _re2
+        m = _re2.search(r"rsi[^0-9]*([0-9]+\.?[0-9]*)", tech)
+        if m and float(m.group(1)) < 25:
+            triggers.append("oversold")
+
+    # VIX > 30 → Systemic Risk
+    geo_txt = results.get("geopolitical","").lower()
+    if "vix" in geo_txt:
+        import re as _re3
+        m2 = _re3.search(r"vix[^0-9]*([0-9]+\.?[0-9]*)", geo_txt)
+        if m2 and float(m2.group(1)) > 30:
+            triggers.append("systemic")
+
+    return list(set(triggers))
+
+def distressed_agent(company, fin_result: str, eco_cal: str) -> str:
+    return run_agent(f"""คุณเป็น Distressed Asset Analyst
+{company['ticker']} มี FCF ติดลบ — วิเคราะห์เชิงลึก
+
+{fin_result}
+Economic Calendar: {eco_cal}
+
+วิเคราะห์:
+1. Cash Runway เหลือกี่เดือน (คำนวณจากเงินสด ÷ burn rate)
+2. แหล่งเงินทุนทางเลือก (debt, equity raise, asset sale)
+3. Covenant risk — เสี่ยงผิดเงื่อนไขหนี้มั้ย
+4. Turnaround probability และ timeline
+5. สรุป: ถือ/ขาย/หลีกเลี่ยง
+
+ตอบเป็นภาษาไทย มีตัวเลขชัดเจน""", 800)
+
+def short_squeeze_agent(company, insider_data: dict, tech_result: str) -> str:
+    si  = insider_data.get("short_pct_float",0) if insider_data else 0
+    dtc = insider_data.get("short_ratio",0) if insider_data else 0
+    return run_agent(f"""คุณเป็น Market Structure Analyst เชี่ยวชาญ Short Squeeze
+{company['ticker']} มี Short Interest {si}% (Days to Cover: {dtc})
+
+Technical Context: {tech_result}
+
+วิเคราะห์:
+1. Short Squeeze Probability (สูง/กลาง/ต่ำ) + เหตุผล
+2. Catalyst ที่จะจุด squeeze (earnings, news, sector rotation)
+3. ถ้า squeeze เกิด ราคาอาจวิ่งถึงระดับไหน
+4. ความเสี่ยงสำหรับคนที่ถือ long ท่ามกลาง short interest สูง
+5. กลยุทธ์: เข้าซื้อก่อน squeeze หรือรอ
+
+ตอบเป็นภาษาไทย มีตัวเลขอ้างอิง""", 700)
+
+def recession_risk_agent(company, mac_result: str, yield_curve: str,
+                          sector_rot: str) -> str:
+    return run_agent(f"""คุณเป็น Macro Strategist เชี่ยวชาญ Recession Analysis
+Yield Curve: {yield_curve} — บ่งชี้ recession risk
+
+Macro Context: {mac_result}
+Sector Rotation: {sector_rot}
+
+วิเคราะห์สำหรับ {company['ticker']} ({company['sector']}):
+1. Yield curve inversion บ่งบอก recession ใน timeline กี่เดือน (historical avg)
+2. Sector {company['sector']} ได้รับผลกระทบจาก recession ยังไง
+3. บริษัทนี้มี defensive characteristics มั้ย (pricing power, recurring revenue)
+4. Sector rotation: capital กำลังไหลไป/ออกจาก sector นี้หรือไม่
+5. กลยุทธ์รับมือ recession สำหรับหุ้นตัวนี้
+
+ตอบเป็นภาษาไทย อ้างอิง historical data""", 800)
+
+def systemic_risk_agent(company, geo_result: str, eco_cal: str) -> str:
+    return run_agent(f"""คุณเป็น Systemic Risk Analyst
+VIX สูงกว่า 30 — ตลาดอยู่ใน Risk-off Mode
+
+Geopolitical Context: {geo_result}
+Economic Calendar: {eco_cal}
+
+วิเคราะห์:
+1. VIX > 30 หมายความว่าอะไรต่อ positioning ในตลาด
+2. Correlation ของ {company['ticker']} กับตลาดในช่วง risk-off (Beta)
+3. Safe haven flows จะกระทบ sector นี้อย่างไร
+4. FOMC ใกล้มาหรือไม่ — จะซ้ำเติมหรือช่วยบรรเทา
+5. กลยุทธ์: hedge, reduce position, หรือ hold
+
+ตอบเป็นภาษาไทย กระชับ""", 700)
+
+def oversold_agent(company, tech_result: str, valuation_ctx: str,
+                   mgmt_cred: str) -> str:
+    return run_agent(f"""คุณเป็น Contrarian Investment Analyst
+{company['ticker']} มี RSI < 25 — Oversold Extreme
+
+Technical: {tech_result}
+Valuation: {valuation_ctx}
+Management Track Record: {mgmt_cred}
+
+วิเคราะห์:
+1. Oversold นี้เป็น genuine value หรือ value trap
+2. Fundamental ยังดีอยู่มั้ย — ราคาลงเพราะอะไร
+3. Insider ซื้อหรือขายช่วงราคาลง (management confidence)
+4. Historical — ครั้งก่อนที่ RSI ต่ำระดับนี้ราคาทำอะไร
+5. Entry zone ที่เหมาะสม และ Stop Loss
+
+ตอบเป็นภาษาไทย มีตัวเลขชัดเจน""", 700)
 
 
 def chat_agent(ticker, company, fin_result, mac_result, geo_result, insider_result, news_result, tech_result, final, messages, earnings_date="N/A"):
@@ -2374,44 +2754,55 @@ if btn_analyze and ticker_input:
             mgmt_cred         = get_management_credibility(ticker_input)
             dcf_val           = calc_simple_dcf(ticker_input)
             earnings_tx       = get_earnings_transcript(ticker_input)
+            eco_cal           = get_economic_calendar()
+            sector_rot        = get_sector_rotation()
+            dcf_scenarios_str = calculate_dcf_scenarios(ticker_input)
 
-        # ===== PARALLEL AGENTS (รัน 6 Agents พร้อมกัน) =====
+        # ===== PARALLEL AGENTS + CHECKPOINT =====
         agent_tasks = {
-            "financial":   lambda: financial_agent(
+            "financial":    lambda: financial_agent(
                 company, financials, quarterly, analyst,
                 sec_data, valuation_ctx, mgmt_cred, dcf_val, earnings_tx
             ),
-            "macro":       lambda: macro_agent(company, macro, yield_curve),
-            "news":        lambda: news_agent(company, news),
-            "technical":   lambda: technical_agent(
+            "macro":        lambda: macro_agent(company, macro, yield_curve),
+            "news":         lambda: news_agent(company, news),
+            "technical":    lambda: technical_agent(
                 company, price_summary, indicators,
                 options_summary, relative_strength
             ),
             "geopolitical": lambda: geopolitical_agent(company, geo_indicators, news),
-            "insider":     lambda: insider_agent(company, insider_data),
+            "insider":      lambda: insider_agent(company, insider_data),
         }
 
-        results      = {}
-        agent_status = {k: "⏳" for k in agent_tasks}
-        status_ph    = st.empty()
+        # ลองโหลด checkpoint ก่อน (ถ้า fail กลางคัน)
+        existing_ckpt = load_checkpoints(ticker_input)
+        results       = dict(existing_ckpt)
+        remaining     = {k:v for k,v in agent_tasks.items() if k not in results}
+
+        agent_status  = {k: ("✅ (cached)" if k in existing_ckpt else "⏳")
+                         for k in agent_tasks}
+        status_ph     = st.empty()
 
         def update_status():
-            lines = [f"{v} {k.capitalize()} Agent" for k, v in agent_status.items()]
-            status_ph.caption("กำลังวิเคราะห์พร้อมกัน: " + " · ".join(lines))
+            lines = [f"{v} {k.capitalize()}" for k,v in agent_status.items()]
+            status_ph.caption("Agents: " + " · ".join(lines))
 
         update_status()
 
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            futures = {pool.submit(fn): name for name, fn in agent_tasks.items()}
-            for future in as_completed(futures):
-                name = futures[future]
-                try:
-                    results[name]     = future.result()
-                    agent_status[name] = "✅"
-                except Exception as e:
-                    results[name]     = f"Agent error: {e}"
-                    agent_status[name] = "❌"
-                update_status()
+        if remaining:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                futures = {pool.submit(fn): name for name,fn in remaining.items()}
+                for future in as_completed(futures):
+                    name = futures[future]
+                    try:
+                        res = future.result()
+                        results[name]      = res
+                        agent_status[name] = "✅"
+                        save_checkpoint(ticker_input, name, res)  # ⑤ Resumable
+                    except Exception as e:
+                        results[name]      = f"Agent error: {e}"
+                        agent_status[name] = "❌"
+                    update_status()
 
         status_ph.empty()
 
@@ -2422,11 +2813,101 @@ if btn_analyze and ticker_input:
         geo_result     = results.get("geopolitical", "")
         insider_result = results.get("insider",      "")
 
-        with st.spinner("Orchestrator (Self-Reflection 2 รอบ)..."):
-            final = orchestrator_agent(
-                company, fin_result, mac_result, geo_result,
-                insider_result, news_result, tech_result
-            )
+        # ===== CONDITIONAL ROUTING ② =====
+        triggers  = check_conditional_triggers(
+            results, indicators, insider_data, macro, yield_curve
+        )
+        cond_results = {}
+        eco_str    = eco_cal.get("summary","")
+
+        if triggers:
+            st.info(f"🔍 พบ condition พิเศษ: {', '.join(triggers)} — รัน Specialized Agents")
+            cond_tasks = {}
+            if "distressed" in triggers:
+                cond_tasks["distressed"] = lambda: distressed_agent(company, fin_result, eco_str)
+            if "squeeze" in triggers:
+                cond_tasks["squeeze"]    = lambda: short_squeeze_agent(company, insider_data, tech_result)
+            if "recession" in triggers:
+                cond_tasks["recession"]  = lambda: recession_risk_agent(company, mac_result, yield_curve, sector_rot)
+            if "systemic" in triggers:
+                cond_tasks["systemic"]   = lambda: systemic_risk_agent(company, geo_result, eco_str)
+            if "oversold" in triggers:
+                cond_tasks["oversold"]   = lambda: oversold_agent(company, tech_result, valuation_ctx, mgmt_cred)
+
+            with st.spinner(f"Specialized Agents ({len(cond_tasks)} ตัว)..."):
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    cf = {pool.submit(fn): name for name,fn in cond_tasks.items()}
+                    for future in as_completed(cf):
+                        cond_results[cf[future]] = future.result()
+
+        cond_summary = "\n\n".join([
+            f"[{k.upper()}]\n{v}" for k,v in cond_results.items()
+        ]) if cond_results else ""
+
+        # ===== HUMAN-IN-THE-LOOP ④ =====
+        if not st.session_state.get(f"confirmed_{ticker_input}"):
+            st.subheader("ผลวิเคราะห์เบื้องต้นจาก Agents")
+            ec1, ec2 = st.columns(2)
+            with ec1:
+                with st.expander("Financial"): st.markdown(fin_result[:400]+"...")
+                with st.expander("Macro"):     st.markdown(mac_result[:400]+"...")
+                with st.expander("Geo"):       st.markdown(geo_result[:400]+"...")
+            with ec2:
+                with st.expander("Technical"): st.markdown(tech_result[:400]+"...")
+                with st.expander("News"):      st.markdown(news_result[:400]+"...")
+                with st.expander("Insider"):   st.markdown(insider_result[:400]+"...")
+            if eco_cal.get("fomc_warning"):
+                st.warning(eco_cal["fomc_warning"])
+            if cond_summary:
+                with st.expander("⚠️ Special Analysis"):
+                    st.markdown(cond_summary)
+
+            st.divider()
+            hc1, hc2 = st.columns(2)
+            if hc1.button("✅ ยืนยัน ให้ Orchestrator สรุป", type="primary", use_container_width=True):
+                st.session_state[f"confirmed_{ticker_input}"] = True
+                st.rerun()
+            if hc2.button("🔄 วิเคราะห์ใหม่ทั้งหมด", use_container_width=True):
+                clear_checkpoints(ticker_input)
+                st.session_state.pop(f"confirmed_{ticker_input}", None)
+                st.rerun()
+            st.stop()
+
+        # ===== STREAMING ORCHESTRATOR ③⑤ =====
+        st.subheader("CIO Full Report")
+        orch_prompt = build_orchestrator_prompt(
+            company, fin_result, mac_result, geo_result,
+            insider_result, news_result, tech_result,
+            eco_str, sector_rot, dcf_scenarios_str, cond_summary
+        )
+        stream_ph = st.empty()
+        initial   = stream_orchestrator(orch_prompt, stream_ph)
+
+        # Self-Reflection
+        reflection = run_agent(f"""ตรวจสอบการวิเคราะห์นี้:
+{initial}
+ตรวจหา: ข้อขัดแย้ง, ความมั่นใจเกินจริง, ข้อมูลที่มองข้าม
+ถ้าพบปัญหา → ระบุ ถ้าไม่พบ → "สมเหตุสมผล"
+ตอบสั้น ภาษาไทย""", 300)
+
+        needs_revision = any(w in reflection for w in [
+            "ขัดแย้ง","ปัญหา","ไม่มีหลักฐาน","มองข้าม","ไม่สมเหตุสมผล"
+        ])
+
+        if needs_revision:
+            st.caption("🔄 Self-Reflection พบปัญหา — กำลังแก้ไข...")
+            revision_prompt = f"""แก้ไขการวิเคราะห์:
+{initial}
+ข้อบกพร่อง: {reflection}
+เขียนใหม่ ตอบเป็นภาษาไทย"""
+            stream_ph2 = st.empty()
+            final = stream_orchestrator(revision_prompt, stream_ph2)
+            final = f"{final}\n\n---\n[Self-Reflection: แก้ไขแล้ว ✅]"
+        else:
+            final = f"{initial}\n\n---\n[Self-Reflection: ผ่าน ✅]"
+
+        # Reset confirmation สำหรับครั้งหน้า
+        st.session_state.pop(f"confirmed_{ticker_input}", None)
 
         st.session_state["history"][ticker_input] = {
             "company":        company,
