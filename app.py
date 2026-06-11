@@ -526,67 +526,93 @@ def portfolio_calc_summary(positions: list, prices: dict) -> dict:
 
 
 # ===== PORTFOLIO NEWS =====
-BULLISH_WORDS = ["beat", "beats", "record", "contract", "partnership", "approved",
-                  "growth", "profit", "surge", "rally", "upgrade", "buy", "strong",
-                  "win", "award", "launch", "breakthrough", "revenue", "earnings beat"]
-BEARISH_WORDS = ["miss", "probe", "fine", "investigation", "lawsuit", "loss",
-                  "downgrade", "sell", "weak", "decline", "cut", "layoff", "fail",
-                  "warning", "recall", "fraud", "violation", "penalty", "miss"]
+BULLISH_WORDS = ["beat","beats","record","contract","partnership","approved",
+                  "growth","profit","surge","rally","upgrade","buy","strong",
+                  "win","award","launch","breakthrough","revenue","earnings beat",
+                  "raised","raised guidance","outperform","bullish","positive"]
+BEARISH_WORDS = ["miss","probe","fine","investigation","lawsuit","loss",
+                  "downgrade","sell","weak","decline","cut","layoff","fail",
+                  "warning","recall","fraud","violation","penalty","bearish",
+                  "negative","debt","bankruptcy","losses"]
+
+import re as _re
+from datetime import datetime as _dt, timedelta as _td
+
+def _clean_content(text: str) -> str:
+    """ตัด markdown, image refs, URL ออกจาก content"""
+    text = _re.sub(r'!\[.*?\]\(.*?\)', '', text)
+    text = _re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+    text = _re.sub(r'https?://\S+', '', text)           # ลบ URL ดิบ
+    text = _re.sub(r'\s+', ' ', text).strip()           # ลบ whitespace ซ้ำ
+    return text[:200]
+
+def _is_recent(pub_date: str, max_days: int = 30) -> bool:
+    """เช็กว่าข่าวอายุไม่เกิน max_days"""
+    if not pub_date:
+        return True  # ไม่มีวันที่ → ผ่าน
+    try:
+        d = _dt.strptime(pub_date[:10], "%Y-%m-%d")
+        return (_dt.now() - d).days <= max_days
+    except:
+        return True
 
 def classify_sentiment(text: str) -> tuple[str, str]:
-    """คืน (label, color_css)"""
     text_lower = text.lower()
     bull = sum(1 for w in BULLISH_WORDS if w in text_lower)
     bear = sum(1 for w in BEARISH_WORDS if w in text_lower)
     if bull > bear:
-        return "Bullish", "var(--color-text-success)"
+        return "Bullish 📈", "var(--color-text-success)"
     elif bear > bull:
-        return "Bearish", "var(--color-text-danger)"
+        return "Bearish 📉", "var(--color-text-danger)"
     return "Neutral", "var(--color-text-secondary)"
 
-@st.cache_data(ttl=1800)
-def get_portfolio_news(tickers: tuple, max_per: int = 5) -> list:
-    """ดึงข่าวอัตโนมัติทุกหุ้นใน portfolio"""
-    results = []
-    tavily_key = st.secrets.get("TAVILY_API_KEY", "")
+def _format_article(a: dict, ticker: str = "") -> dict | None:
+    """แปลง raw article → cleaned dict, คืน None ถ้าข่าวเก่าเกิน"""
+    pub = a.get("published_date", "")[:10]
+    if not _is_recent(pub, max_days=30):
+        return None
+    title   = _clean_content(a.get("title", "N/A"))
+    content = _clean_content(a.get("content", ""))
+    if not title or title == "N/A":
+        return None
+    sentiment, color = classify_sentiment(title + " " + content)
+    return {
+        "ticker":     ticker,
+        "title":      title,
+        "content":    content,
+        "url":        a.get("url", ""),
+        "published":  pub,
+        "sentiment":  sentiment,
+        "sent_color": color,
+    }
 
+@st.cache_data(ttl=1800)
+def get_portfolio_news(tickers: tuple, max_per: int = 7) -> list:
+    results    = []
+    tavily_key = st.secrets.get("TAVILY_API_KEY", "")
     for t in tickers:
         try:
             if tavily_key:
                 from tavily import TavilyClient
                 client   = TavilyClient(api_key=tavily_key)
                 response = client.search(
-                    query=f"{t} stock news",
-                    search_depth="basic",
+                    query=f"{t} stock news 2025 2026",
+                    search_depth="advanced",
                     max_results=max_per,
                 )
                 for a in response.get("results", []):
-                    sentiment, color = classify_sentiment(
-                        a.get("title","") + " " + a.get("content","")
-                    )
-                    results.append({
-                        "ticker":    t,
-                        "title":     a.get("title", "N/A"),
-                        "content":   a.get("content", "")[:200],
-                        "url":       a.get("url", ""),
-                        "published": a.get("published_date", "")[:10],
-                        "sentiment": sentiment,
-                        "sent_color": color,
-                    })
+                    item = _format_article(a, t)
+                    if item:
+                        results.append(item)
             else:
-                # fallback → yfinance news
                 news = yf.Ticker(t).news or []
                 for n in news[:max_per]:
-                    title = n.get("content", {}).get("title", "N/A")
+                    title = _clean_content(n.get("content", {}).get("title", "N/A"))
                     sentiment, color = classify_sentiment(title)
                     results.append({
-                        "ticker":    t,
-                        "title":     title,
-                        "content":   "",
-                        "url":       n.get("content", {}).get("canonicalUrl", {}).get("url", ""),
-                        "published": "",
-                        "sentiment": sentiment,
-                        "sent_color": color,
+                        "ticker": t, "title": title, "content": "",
+                        "url": n.get("content",{}).get("canonicalUrl",{}).get("url",""),
+                        "published": "", "sentiment": sentiment, "sent_color": color,
                     })
         except:
             pass
@@ -594,27 +620,18 @@ def get_portfolio_news(tickers: tuple, max_per: int = 5) -> list:
 
 @st.cache_data(ttl=600)
 def search_news_manual(query: str, max_results: int = 10) -> list:
-    """Manual search ด้วย Tavily"""
     tavily_key = st.secrets.get("TAVILY_API_KEY", "")
     if not tavily_key:
         return []
     try:
         from tavily import TavilyClient
         client   = TavilyClient(api_key=tavily_key)
-        response = client.search(query=query, search_depth="basic", max_results=max_results)
+        response = client.search(query=query, search_depth="advanced", max_results=max_results)
         results  = []
         for a in response.get("results", []):
-            sentiment, color = classify_sentiment(
-                a.get("title","") + " " + a.get("content","")
-            )
-            results.append({
-                "title":     a.get("title", "N/A"),
-                "content":   a.get("content","")[:200],
-                "url":       a.get("url",""),
-                "published": a.get("published_date","")[:10],
-                "sentiment": sentiment,
-                "sent_color": color,
-            })
+            item = _format_article(a)
+            if item:
+                results.append(item)
         return results
     except:
         return []
