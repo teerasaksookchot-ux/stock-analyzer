@@ -852,71 +852,72 @@ Shares Short: {insider_data['shares_short']:,}
 
 # ===== DATA NODES =====
 
+@st.cache_data(ttl=1800)
 def get_company_info(ticker):
+    """ดึง company info ด้วย Ticker object เดียว — ลด API calls"""
     try:
+        stock = yf.Ticker(ticker)
         price = 0
         info  = {}
 
-        # วิธีที่ 1: yf.download — reliable ที่สุด ใช้ API endpoint ต่างกัน
+        # ดึง info ก่อน (ครั้งเดียว ใช้ Ticker object เดิม)
         try:
-            d = yf.download(
-                ticker, period="5d",
-                progress=False, auto_adjust=True,
-                actions=False,
-            )
-            if not d.empty:
-                closes = d["Close"].dropna()
-                if not closes.empty:
-                    price = float(closes.iloc[-1])
+            info  = stock.info
+            price = float(info.get("currentPrice") or
+                          info.get("regularMarketPrice") or 0)
         except:
             pass
 
-        # วิธีที่ 2: fast_info
+        # Fallback 1: fast_info
         if not price:
             try:
-                price = float(yf.Ticker(ticker).fast_info.last_price or 0)
+                price = float(stock.fast_info.last_price or 0)
             except:
                 pass
 
-        # วิธีที่ 3: history
+        # Fallback 2: history (ไม่ต้องสร้าง Ticker ใหม่)
         if not price:
             try:
-                h = yf.Ticker(ticker).history(period="5d")
+                h = stock.history(period="5d")
                 closes = h["Close"].dropna()
                 if not closes.empty:
                     price = float(closes.iloc[-1])
             except:
                 pass
 
-        # วิธีที่ 4: .info (ช้าที่สุด แต่ fallback สุดท้าย)
+        # Fallback 3: yf.download — endpoint ต่างกัน
         if not price:
             try:
-                info  = yf.Ticker(ticker).info
-                price = float(info.get("currentPrice") or
-                              info.get("regularMarketPrice") or 0)
+                d = yf.download(ticker, period="5d",
+                                progress=False, auto_adjust=True,
+                                actions=False)
+                if not d.empty:
+                    closes = d["Close"].dropna()
+                    if not closes.empty:
+                        price = float(closes.iloc[-1])
             except:
                 pass
 
         if not price:
             return None
 
-        # ดึง metadata (best effort — ไม่ fail ถ้าไม่ได้)
-        if not info:
-            try:
-                info = yf.Ticker(ticker).info
-            except:
-                info = {}
+        name = (info.get("shortName") or info.get("longName") or ticker)
 
-        name = (info.get("shortName") or
-                info.get("longName") or ticker)
+        # Market cap fallback จาก fast_info
+        mktcap = info.get("marketCap", 0) or 0
+        if not mktcap:
+            try:
+                mktcap = float(stock.fast_info.market_cap or 0)
+            except:
+                mktcap = 0
 
         return {
             "ticker":       ticker,
             "name":         name,
             "price":        round(price, 2),
-            "market_cap_b": round(info.get("marketCap", 0) / 1e9, 1),
-            "sector":       info.get("sector", "N/A"),
-            "industry":     info.get("industry", "N/A"),
+            "market_cap_b": round(mktcap / 1e9, 1),
+            "sector":       info.get("sector") or "N/A",
+            "industry":     info.get("industry") or "N/A",
             "summary":      (info.get("longBusinessSummary") or "N/A")[:500],
         }
     except:
@@ -2685,6 +2686,7 @@ btn_analyze  = col_a.button("🤖 Full Analyze (~$0.09)", type="primary", use_co
 # ===== QUICK VIEW MODE =====
 if btn_quick and ticker_input:
     with st.spinner("กำลังดึงข้อมูล..."):
+        import time as _time
         company = get_company_info(ticker_input)
         if not company:
             st.error(f"ไม่พบข้อมูล {ticker_input}")
@@ -2692,10 +2694,13 @@ if btn_quick and ticker_input:
         hist, fin, bs, cf = get_chart_data(ticker_input)
         price_summary     = get_price_summary(hist)
         indicators_raw    = get_technical_indicators(hist)
+        _time.sleep(0.3)   # หลีกเลี่ยง rate limit
         options_data      = get_options_data(ticker_input)
         valuation_ctx     = get_valuation_context(ticker_input)
+        _time.sleep(0.3)
         relative_str      = get_relative_strength(ticker_input, company.get("sector","Technology"))
         mgmt_cred         = get_management_credibility(ticker_input)
+        _time.sleep(0.3)
         dcf_val           = calc_simple_dcf(ticker_input)
         macro             = get_macro_data()
         geo_ind           = get_geopolitical_indicators()
