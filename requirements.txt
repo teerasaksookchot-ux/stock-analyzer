@@ -1,8 +1,10 @@
-streamlit
-yfinance
-anthropic
-requests
-plotly
-scipy
-supabase
-tavily-python
+# Pinned 2026-06-12 — เวอร์ชันที่ทดสอบแล้วใช้ด้วยกันได้
+# อยากอัปเดต: เปลี่ยนตัวเลขแล้วทดสอบก่อน deploy (อย่าปล่อยลอย)
+streamlit==1.58.0
+yfinance==1.4.1
+anthropic==0.109.1
+requests==2.34.2
+plotly==6.8.0
+scipy==1.17.1
+supabase==2.31.0
+tavily-python==0.7.26
