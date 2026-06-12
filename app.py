@@ -405,8 +405,12 @@ def portfolio_load_positions() -> list:
             params={"order": "created_at.asc"},
             timeout=10,
         )
-        return r.json() if r.status_code == 200 else []
-    except:
+        if r.status_code == 200:
+            return r.json()
+        st.warning(f"โหลด portfolio ไม่สำเร็จ (HTTP {r.status_code}) — อาจไม่ใช่พอร์ตว่างจริง ลองรีเฟรช")
+        return []
+    except Exception as e:
+        st.warning(f"โหลด portfolio ไม่สำเร็จ ({type(e).__name__}) — อาจไม่ใช่พอร์ตว่างจริง ลองรีเฟรช")
         return []
 
 def portfolio_add_transaction(ticker, action, shares, price):
@@ -439,13 +443,15 @@ def portfolio_load_transactions() -> list:
         return []
 
 @st.cache_data(ttl=3600)
-def get_usd_thb_rate() -> float:
-    """ดึง USD/THB exchange rate"""
+def get_usd_thb_rate() -> tuple[float, bool]:
+    """ดึง USD/THB exchange rate — คืน (rate, is_live); is_live=False = ใช้ค่า fallback"""
     try:
         rate = yf.Ticker("USDTHB=X").fast_info.last_price
-        return round(rate, 2) if rate and rate > 0 else 32.84
+        if rate and rate > 0:
+            return round(rate, 2), True
     except:
-        return 32.84
+        pass
+    return 32.84, False
 
 BADGE_COLORS = [
     ("#E6F1FB","#185FA5"), ("#E1F5EE","#0F6E56"), ("#EEEDFE","#3C3489"),
@@ -2253,7 +2259,7 @@ def competitor_agent(company, competitors):
     comp_summary = "\n".join([
         f"- {c['ticker']} ({c['name']}): "
         f"Market Cap=${c['market_cap_b']:.1f}B, "
-        f"P/E={c['pe']:.1f if c['pe'] else 'N/A'}, "
+        f"P/E={round(c['pe'],1) if c['pe'] else 'N/A'}, "
         f"Gross Margin={round(c['gross_margin']*100,1) if c['gross_margin'] else 'N/A'}%, "
         f"Rev Growth={round(c['rev_growth']*100,1) if c['rev_growth'] else 'N/A'}%"
         for c in competitors
@@ -2429,9 +2435,15 @@ Management Track Record: {mgmt_cred}
 def chat_agent(ticker, company, fin_result, mac_result, geo_result, insider_result, news_result, tech_result, final, messages, earnings_date="N/A"):
     """Chat Agent ที่รู้จักผลวิเคราะห์ทั้งหมดและราคา real-time"""
     realtime_price = get_realtime_price(ticker)
+    if realtime_price and realtime_price > 0:
+        price_str  = f"${realtime_price:.2f}"
+        price_note = f"ราคาปัจจุบัน (real-time): {price_str}"
+    else:
+        price_str  = "ดึงราคา real-time ไม่ได้"
+        price_note = "ราคา real-time: ดึงไม่ได้ — ใช้ราคาจากผลวิเคราะห์ด้านล่างแทน ห้ามสมมติราคาเอง"
 
     system_context = f"""คุณเป็น Investment Advisor ผู้เชี่ยวชาญที่วิเคราะห์หุ้น {ticker} ({company['name']}) มาแล้ว
-ราคาปัจจุบัน (real-time): ${realtime_price:.2f}
+{price_note}
 วันประกาศผลประกอบการถัดไป: {earnings_date}
 
 === ผลวิเคราะห์จากทีม ===
@@ -2459,12 +2471,12 @@ def chat_agent(ticker, company, fin_result, mac_result, geo_result, insider_resu
 
 === คำแนะนำในการตอบ ===
 - ตอบโดยอ้างอิงจากผลวิเคราะห์ข้างต้นเสมอ
-- ใช้ราคา real-time ${realtime_price:.2f} ในการประเมินจุดเข้า/ออก
+- ใช้ราคา real-time ({price_str}) ในการประเมินจุดเข้า/ออก ถ้าดึงราคาไม่ได้ให้ใช้ราคาจากผลวิเคราะห์
 - ตอบเป็นภาษาไทย กระชับ ชัดเจน มีตัวเลขอ้างอิง
 - ถ้าคำถามเกินขอบเขตข้อมูลที่มี ให้บอกตรงๆ"""
 
     api_messages = [{"role": "user", "content": system_context + "\n\nเริ่มการสนทนาได้เลย"}]
-    api_messages.append({"role": "assistant", "content": f"พร้อมแล้วครับ ผมมีข้อมูลวิเคราะห์ {ticker} ครบถ้วน ราคาปัจจุบัน ${realtime_price:.2f} ถามได้เลยครับ"})
+    api_messages.append({"role": "assistant", "content": f"พร้อมแล้วครับ ผมมีข้อมูลวิเคราะห์ {ticker} ครบถ้วน ({price_str}) ถามได้เลยครับ"})
 
     for msg in messages:
         api_messages.append({"role": msg["role"], "content": msg["content"]})
@@ -2491,7 +2503,7 @@ if st.session_state.get("show_portfolio"):
         st.session_state["show_portfolio"] = False
         st.rerun()
 
-    rate      = get_usd_thb_rate()
+    rate, rate_is_live = get_usd_thb_rate()
     positions = portfolio_load_positions()
 
     if positions:
@@ -2539,12 +2551,12 @@ if st.session_state.get("show_portfolio"):
 <div style="background:var(--color-background-secondary);border-radius:14px;padding:20px 22px;margin-bottom:20px;">
   <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:2px;">
     <div style="font-size:12px;color:var(--color-text-tertiary);">มูลค่าพอร์ตรวม</div>
-    <div style="font-size:11px;color:var(--color-text-tertiary);">1 USD = {rate:.2f} ฿</div>
+    <div style="font-size:11px;color:var(--color-text-tertiary);">1 USD = {rate:.2f} ฿{'' if rate_is_live else ' (โดยประมาณ)'}</div>
   </div>
   <div style="font-size:30px;font-weight:500;color:var(--color-text-primary);line-height:1.2;">${summary['total_value']:,.2f} USD</div>
   <div style="font-size:13px;color:var(--color-text-secondary);margin-top:2px;">≈ {int(summary['total_value']*rate):,} บาท</div>
   <div style="display:flex;gap:2px;height:6px;margin:14px 0 14px;border-radius:3px;overflow:hidden;">{bar_segs}</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0;">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px 0;">
     <div style="padding-right:12px;">
       <div style="font-size:11px;color:var(--color-text-tertiary);">เปลี่ยนวันนี้</div>
       <div style="font-size:14px;font-weight:500;color:{day_css};">{day_sign}{abs(summary['day_change_pct']):.2f}%</div>
@@ -2971,9 +2983,9 @@ if btn_analyze and ticker_input:
 
             with st.spinner(f"Specialized Agents ({len(cond_tasks)} ตัว)..."):
                 with ThreadPoolExecutor(max_workers=5) as pool:
-                    cf = {pool.submit(fn): name for name,fn in cond_tasks.items()}
-                    for future in as_completed(cf):
-                        cond_results[cf[future]] = future.result()
+                    cond_futures = {pool.submit(fn): name for name,fn in cond_tasks.items()}
+                    for future in as_completed(cond_futures):
+                        cond_results[cond_futures[future]] = future.result()
 
         cond_summary = "\n\n".join([
             f"[{k.upper()}]\n{v}" for k,v in cond_results.items()
